@@ -707,11 +707,12 @@ void ConfirmDelete() {
                 break;
             } else if (input.Event.KeyEvent.wVirtualKeyCode == 'N' || 
                        input.Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE) {
-                ClearMarkedFiles();
                 break;
             }
         }
     }
+
+    ClearMarkedFiles();
 }
 
 void DrawDeletePopup(int width, int height, CHAR_INFO* out_buffer) {
