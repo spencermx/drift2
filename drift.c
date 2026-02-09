@@ -508,6 +508,8 @@ void ToggleMark() {
         strcpy(marked_files[marked_files_count].path, full_path);
         marked_files[marked_files_count].selected_row = selected_row;
         marked_files_count++;
+
+        strcpy(mark_directory, current_directory);
     }
 }
 
