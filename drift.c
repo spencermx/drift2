@@ -11,7 +11,7 @@
 // - Ctrl + D : Page Down
 // - Ctrl + U : Page Up
 // - Enter    : Open file with default application (or vim if in PATH)
-// Operations  on marked files:
+// Operations on marked files:
 // - Space    : Toggle mark on selected file/directory
 // - Y        : Mark selected files for copy (yank)
 // - X        : Mark selected files for move (cut)
@@ -19,11 +19,12 @@
 // - D        : Delete marked files (with confirmation)
 // - Ctrl + A : Mark all files in the current Directory
 // - Ctrl + [ : Clear all mark_status
+// Misc:
 // - O        : Show recently visited directories (history) and jump to selected one
-// Other:
-// - A: Create new file/directory (append '\' to name for directory)
-
-// >: x86_64-w64-mingw32-gcc drift.c -o drift.exe 
+// - A        : Create new file/directory (append '\' to name for directory)
+//
+// Compilation - x86_64-w64-mingw32-gcc drift.c -o drift.exe 
+//             - cl drift.c
 
 #define _CRT_SECURE_NO_WARNINGS
 #undef UNICODE
