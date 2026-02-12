@@ -426,6 +426,10 @@ int HandleInput() {
                 }
                 break;
             }
+            case VK_ESCAPE: {
+                ClearMarkedFiles();
+                break;
+            }
             case 'Q': {
                 pending_g = false;
                 return 0; // Exit
@@ -481,8 +485,7 @@ void HandlePaste(int move) {
     }
 
     LoadCurrentDirectory();
-    SetMarkStatus(MARKED);
-    marked_files_count = 0;
+    ClearMarkedFiles();
 }
 
 void ToggleMark() {
