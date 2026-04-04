@@ -1,5 +1,11 @@
 @echo off
 
+for /F %%a in ('echo prompt $E ^| cmd') do set "ESC=%%a"
+set "RESET=%ESC%[0m"
+set "CYAN=%ESC%[36m"
+set "MAGENTA=%ESC%[35m"
+set "YELLOW=%ESC%[33m"
+
 :: Check if we're in a git repo
 git rev-parse --is-inside-work-tree >nul 2>&1
 if %ERRORLEVEL% neq 0 (
