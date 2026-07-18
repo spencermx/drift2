@@ -56,6 +56,7 @@
 #define BOX_BOTTOM_RIGHT L'\x2518'
 #define BOX_HORIZONTAL   L'\x2500'
 #define BOX_VERTICAL     L'\x2502'
+#define BOX_T_DOWN       L'\x252C'
 
 #define POPUP_WIDTH 35
 #define POPUP_HEIGHT 15
@@ -92,6 +93,7 @@ int GetFilesInDirectory(char* path, WIN32_FIND_DATA files[]);
 int CompareFiles(const void* a, const void* b);
 void GetParentDirectory(char* path, char* parent);
 bool IsDirectory(WIN32_FIND_DATA* file_data);
+WORD FileColor(WIN32_FIND_DATA* file);
 bool GetSelectedRowPath(int selected_row, char* out_path);
 bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file_data, char* out_path);
 int CalculateDistance(char* current, char* target);
@@ -130,6 +132,12 @@ void DrawOldHistoryPopup(int width, int height, DistanceEntry* distances, int di
 WORD white = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
 WORD blue = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
 WORD red = FOREGROUND_RED | FOREGROUND_INTENSITY;
+WORD green = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+WORD yellow = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+WORD gray = FOREGROUND_INTENSITY;
+// Selection bar: light-gray background; row foregrounds are remapped to
+// their dark variants so the text stays readable on it
+WORD bar_background = BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE;
 WORD color;
 
 HANDLE hIn;
@@ -179,6 +187,11 @@ void Initialize() {
     hAlt = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, 0, NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
     SetConsoleActiveScreenBuffer(hAlt);
 
+    // The selection bar marks the current row -- the blinking hardware
+    // cursor is only shown inside the create-name popup
+    CONSOLE_CURSOR_INFO cursor_info = { 25, FALSE };
+    SetConsoleCursorInfo(hAlt, &cursor_info);
+
     // Set initial directory (copy into a separate buffer first --
     // ChangeCurrentDirectory strcpy's into current_directory, and
     // overlapping source/destination is undefined behavior)
@@ -202,13 +215,13 @@ void DrawScreen() {
     int width = info.srWindow.Right - info.srWindow.Left + 1;
     int height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
-    // Window too small to draw the layout safely (one header line plus at
-    // least one listing row)
-    if (width < MIN_WINDOW_WIDTH || height < 2) {
+    // Window too small to draw the layout safely (header line, rule line,
+    // and at least one listing row)
+    if (width < MIN_WINDOW_WIDTH || height < 3) {
         return;
     }
 
-    int list_height = height - 1; // row 0 is the header line
+    int list_height = height - 2; // row 0 is the header, row 1 the rule
 
     // Re-clamp scroll state against the *current* window size. The window may
     // have been resized since the last keypress, which would otherwise let the
@@ -289,23 +302,27 @@ void DrawScreen() {
         }
         WriteToBuffer(buffer, width, 0, 0, path_display, blue);
     }
+
+    // Horizontal rule under the header, with a junction where it crosses
+    // the column divider
+    for (int col = 0; col < width; col++) {
+        int index = width + col;
+        buffer[index].Char.UnicodeChar = (col == COLUMN_DIVIDER_POSITION) ? BOX_T_DOWN : BOX_HORIZONTAL;
+        buffer[index].Attributes = blue;
+    }
     // ============================= Draw Header Line ==================================
 
     // ============================= Draw Parent Directory =============================
     for (int i = 0; i < list_height && i < parent_directory_file_count; i++) {
         int file_index = i;
 
-        if (IsDirectory(&parent_directory_files[file_index])) {
-            color = blue;
-        } else {
-            color = white;
-        }
+        color = FileColor(&parent_directory_files[file_index]);
 
         AnsiToWide(parent_directory_files[file_index].cFileName, wname, MAX_PATH);
         int len = (int)wcslen(wname);
 
         for (int col = 0; col < len && col < COLUMN_DIVIDER_POSITION - 2; col++) {
-            int index = (i + 1) * width + col;
+            int index = (i + 2) * width + col;
             buffer[index].Char.UnicodeChar = wname[col];
             buffer[index].Attributes = color;
         }
@@ -314,7 +331,7 @@ void DrawScreen() {
 
     // ============================= Draw Column Divider ===============================
     color = blue;
-    for (int i = 1; i < height; i++) {
+    for (int i = 2; i < height; i++) {
         int index = i * width + COLUMN_DIVIDER_POSITION;
         buffer[index].Char.UnicodeChar = BOX_VERTICAL;
         buffer[index].Attributes = color;
@@ -324,18 +341,28 @@ void DrawScreen() {
     // ============================= Draw Current Directory ============================
     for (int i = 0; i < list_height && top_row + i < current_directory_file_count; i++) {
         int file_index = top_row + i;
+        bool is_selected = (file_index == selected_row);
 
-        if (IsDirectory(&current_directory_files[file_index])) {
-            color = blue;
-        } else {
-            color = white;
+        color = FileColor(&current_directory_files[file_index]);
+
+        if (is_selected) {
+            // Remap the foreground to its dark variant (white becomes black)
+            // and paint the whole pane-width segment as the selection bar
+            WORD fg = color & (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
+            if (fg == (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE)) {
+                fg = 0;
+            }
+            color = fg | bar_background;
+            for (int col = COLUMN_DIVIDER_POSITION + 1; col < width; col++) {
+                buffer[(i + 2) * width + col].Attributes = color;
+            }
         }
 
         AnsiToWide(current_directory_files[file_index].cFileName, wname, MAX_PATH);
         int len = (int)wcslen(wname);
 
         for (int col = 0; col < len && col + COLUMN_DIVIDER_POSITION + 4 < width; col++) {
-            int index = (i + 1) * width + COLUMN_DIVIDER_POSITION + 4 + col;
+            int index = (i + 2) * width + COLUMN_DIVIDER_POSITION + 4 + col;
             buffer[index].Char.UnicodeChar = wname[col];
             buffer[index].Attributes = color;
         }
@@ -350,17 +377,26 @@ void DrawScreen() {
             if (GetFilePath(current_directory, &current_directory_files[file_index], row_path)) {
                 for (int j = 0; j < marked_files_count; j++) {
                     if (strcmp(marked_files[j].path, row_path) == 0) {
-                        int mark_index = (i + 1) * width + COLUMN_DIVIDER_POSITION + 1;
+                        int mark_index = (i + 2) * width + COLUMN_DIVIDER_POSITION + 1;
 
+                        WORD mark_color = white;
                         if (mark_status == MARKED) {
                             buffer[mark_index].Char.UnicodeChar = L'*';
+                            mark_color = yellow;
                         } else if (mark_status == YANKED) {
                             buffer[mark_index].Char.UnicodeChar = L'Y';
+                            mark_color = green;
                         } else if (mark_status == CUT) {
                             buffer[mark_index].Char.UnicodeChar = L'X';
+                            mark_color = red;
                         }
 
-                        buffer[mark_index].Attributes = white;
+                        // On the selection bar, dim the mark to its dark
+                        // variant and keep the bar background beneath it
+                        if (is_selected) {
+                            mark_color = (mark_color & (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE)) | bar_background;
+                        }
+                        buffer[mark_index].Attributes = mark_color;
                         break;
                     }
                 }
@@ -370,11 +406,9 @@ void DrawScreen() {
     }
     // ============================= Draw Current Directory ============================
 
-    // Draw the cursor (skip in empty directories -- there is nothing to point at)
-    if (current_directory_file_count > 0) {
-        int index = (selected_row - top_row + 1) * width + COLUMN_DIVIDER_POSITION + 2;
-        buffer[index].Char.UnicodeChar = L'>';
-        buffer[index].Attributes = white;
+    // Empty directories get an explicit placeholder instead of a blank pane
+    if (current_directory_file_count == 0) {
+        WriteToBuffer(buffer, width, 2, COLUMN_DIVIDER_POSITION + 4, "(empty)", gray);
     }
 
     COORD buffer_size = { (SHORT)width, (SHORT)height };
@@ -388,12 +422,6 @@ void DrawScreen() {
         (SHORT)(info.srWindow.Top + height - 1)
     };
     WriteConsoleOutputW(hAlt, buffer, buffer_size, origin, &region);
-
-    COORD cursor_position = {
-        (SHORT)(info.srWindow.Left + COLUMN_DIVIDER_POSITION + 4),
-        (SHORT)(info.srWindow.Top + 1 + selected_row - top_row)
-    };
-    SetConsoleCursorPosition(hAlt, cursor_position);
 }
 
 int HandleInput() {
@@ -1158,6 +1186,10 @@ void HandleCreate() {
     CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
     if (popup_buffer == NULL) return;
 
+    // Show the hardware cursor while typing in the name field
+    CONSOLE_CURSOR_INFO cursor_info = { 25, TRUE };
+    SetConsoleCursorInfo(hAlt, &cursor_info);
+
     while (1) {
         // Draw popup
         DrawCreatePopup(popup_w, name, popup_buffer);
@@ -1203,6 +1235,9 @@ void HandleCreate() {
     }
 
     free(popup_buffer);
+
+    cursor_info.bVisible = FALSE;
+    SetConsoleCursorInfo(hAlt, &cursor_info);
 
     if (name[0] == '\0') return;
 
@@ -1450,16 +1485,29 @@ void ClearMarkedFiles() {
     SetMarkStatus(MARKED);
 }
 
-// Listing rows only -- the top row of the window is the header line
+// Listing rows only -- the top two window rows are the header and the rule
 int GetVisibleRows() {
     CONSOLE_SCREEN_BUFFER_INFO info;
     if (!GetConsoleScreenBufferInfo(hAlt, &info)) return 1;
-    int rows = info.srWindow.Bottom - info.srWindow.Top;
+    int rows = info.srWindow.Bottom - info.srWindow.Top - 1;
     return rows < 1 ? 1 : rows;
 }
 
 bool IsDirectory(WIN32_FIND_DATA* file_data) {
     return (file_data->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+}
+
+// Display color: hidden files are dimmed, directories blue, executables
+// green, everything else white
+WORD FileColor(WIN32_FIND_DATA* file) {
+    if (file->dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) return gray;
+    if (file->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return blue;
+    char* ext = strrchr(file->cFileName, '.');
+    if (ext != NULL && (_stricmp(ext, ".exe") == 0 || _stricmp(ext, ".bat") == 0 ||
+                        _stricmp(ext, ".cmd") == 0 || _stricmp(ext, ".com") == 0)) {
+        return green;
+    }
+    return white;
 }
 
 // Same contract as GetFilePath -- false on a mangled or over-long name, so
