@@ -10,37 +10,42 @@
 // - gg       : Move to top of the list
 // - Ctrl + D : Half page down
 // - Ctrl + U : Half page up
-// - Enter    : Open file with vim (or default application if vim is not in PATH)
+// - Enter    : Open file in vim (falls back to default application)
 // Operations on marked files:
 // - Space    : Toggle mark on selected file/directory
 // - Y        : Mark selected files for copy (yank)
 // - X        : Mark selected files for move (cut)
 // - P        : Paste (copy/move) marked files to current directory
 // - D        : Delete marked files (with confirmation)
-// - Ctrl + A : Mark all files in the current directory
+// - Ctrl + A : Mark all files in the current Directory
 // - Ctrl + [ : Clear all marks
 // Misc:
-// - O        : Jump list of visited directories (farthest first) - press number to jump
+// - O        : Show visited directories and jump to selected one
 // - A        : Create new file/directory (append '\' to name for directory)
 //
-// Known limitations: no UNC path support (drive-letter paths assumed),
-// directories capped at MAX_FILES entries, paths capped at MAX_PATH.
+// Known limitations: filenames outside the system ANSI codepage are not
+// supported (requires FindFirstFileW conversion); UNC paths not supported.
 //
 // Compilation - x86_64-w64-mingw32-gcc drift.c -o drift.exe
 //             - cl drift.c
 
 #define _CRT_SECURE_NO_WARNINGS
+#undef UNICODE
+#undef _UNICODE
 #include <windows.h>
-#include <shellapi.h>
-#include <strsafe.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <stdbool.h>
+#include <shellapi.h>
 
 #pragma comment(lib, "shell32.lib")
 
 // =========================== Types and Constants ===========================
 #define MAX_FILES 4096
+
+// Unicode box-drawing characters (rendered via WriteConsoleOutputW,
+// codepage-independent)
 #define BOX_TOP_LEFT     L'\x250C'
 #define BOX_TOP_RIGHT    L'\x2510'
 #define BOX_BOTTOM_LEFT  L'\x2514'
@@ -48,10 +53,11 @@
 #define BOX_HORIZONTAL   L'\x2500'
 #define BOX_VERTICAL     L'\x2502'
 
-#define DELETE_POPUP_WIDTH 35
-#define DELETE_POPUP_HEIGHT 15
+#define POPUP_WIDTH 35
+#define POPUP_HEIGHT 15
+#define CREATE_POPUP_WIDTH 50
 #define COLUMN_DIVIDER_POSITION 28
-#define MIN_SCREEN_WIDTH (COLUMN_DIVIDER_POSITION + 8)
+#define MIN_WINDOW_WIDTH (COLUMN_DIVIDER_POSITION + 8)
 
 enum MarkStatus {
     MARKED,
@@ -59,13 +65,12 @@ enum MarkStatus {
     CUT
 };
 typedef struct {
-    WCHAR path[MAX_PATH];
+    char path[MAX_PATH];
     int selected_row;
     int top_row;
 } DirectoryState;
 typedef struct {
-    WCHAR path[MAX_PATH];
-    int row;
+    char path[MAX_PATH];
 } MarkedFile;
 typedef struct {
     int index;
@@ -77,64 +82,62 @@ typedef struct {
 void DrawScreen();
 int HandleInput();
 void ModifySelectedRow(int num);
-void ChangeCurrentDirectory(WCHAR* path);
-int GetFilesInDirectory(WCHAR* path, WIN32_FIND_DATAW files[]);
-void GetParentDirectory(WCHAR* path, WCHAR* parent);
-bool IsDirectory(WIN32_FIND_DATAW* file_data);
-void GetSelectedRowPath(int row, WCHAR* out_path);
-void GetFilePath(WCHAR* directory, WIN32_FIND_DATAW* file_data, WCHAR* out_path);
-void JoinPath(WCHAR* out_path, const WCHAR* directory, const WCHAR* name);
+void ChangeCurrentDirectory(char* path);
+int GetFilesInDirectory(char* path, WIN32_FIND_DATA files[]);
+int CompareFiles(const void* a, const void* b);
+void GetParentDirectory(char* path, char* parent);
+bool IsDirectory(WIN32_FIND_DATA* file_data);
+void GetSelectedRowPath(int selected_row, char* out_path);
+void GetFilePath(char* current_directory, WIN32_FIND_DATA* file_data, char* out_path);
 int GetVisibleRows();
-bool IsRootDirectory(WCHAR* path);
+bool IsRootDirectory(char* path);
 void SaveDirectoryState();
 void RestoreDirectoryState();
 void Cleanup();
 void Initialize();
-void ApplyInputMode();
 void ToggleMark();
 bool MarkedFilesFull();
 void SetMarkStatus(enum MarkStatus status);
 void HandlePaste(int move);
 bool IsMarkDirectorySet();
 bool MarkDirEqualToCurrentDir();
-bool ConfirmDelete();
+void ConfirmDelete();
 void DrawDeletePopup(int width, int height, CHAR_INFO* out_buffer);
-void DrawBox(CHAR_INFO* buffer, int width, int height);
-void WriteToBuffer(CHAR_INFO* buffer, int width, int row, int col, const WCHAR* text, WORD color);
-void ShowMessage(const WCHAR* msg);
-WCHAR* BuildMarkedFileList();
+void WriteToBuffer(CHAR_INFO* buffer, int width, int row, int col, const char* text, WORD color);
+void AnsiToWide(const char* src, wchar_t* dst, int dst_count);
+char* BuildFromList(size_t* out_size);
+void OpenFileInEditor();
 
 void LoadParentDirectory();
 void LoadCurrentDirectory();
-void SyncMarkedRows();
+void ReloadCurrentDirectory();
 void ClearMarkedFiles();
-void DrawCreatePopup(int width, WCHAR* input_text, CHAR_INFO* out_buffer);
+void DrawCreatePopup(int width, char* input_text, CHAR_INFO* out_buffer);
 void HandleCreate();
 void HandleMarkOperation(enum MarkStatus new_status);
 void HandleOldHistory();
 void DrawOldHistoryPopup(int width, int height, DistanceEntry* distances, int display_count, CHAR_INFO* out_buffer);
-int CompareFiles(const void* a, const void* b);
 // =========================== Function Declarations =========================
 
 // =========================== Global Variables ==============================
-static const WORD COLOR_WHITE = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
-static const WORD COLOR_BLUE  = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
-static const WORD COLOR_RED   = FOREGROUND_RED | FOREGROUND_INTENSITY;
-static const WORD COLOR_GRAY  = FOREGROUND_INTENSITY;
+WORD white = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+WORD blue = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+WORD red = FOREGROUND_RED | FOREGROUND_INTENSITY;
+WORD color;
 
 HANDLE hIn;
 HANDLE hOriginal;
 HANDLE hAlt;
-DWORD original_input_mode;
+DWORD original_console_mode;
 
 DirectoryState history[MAX_FILES];
 MarkedFile marked_files[MAX_FILES];
-WIN32_FIND_DATAW current_directory_files[MAX_FILES];
-WIN32_FIND_DATAW parent_directory_files[MAX_FILES];
+WIN32_FIND_DATA current_directory_files[MAX_FILES];
+WIN32_FIND_DATA parent_directory_files[MAX_FILES];
 
-WCHAR mark_directory[MAX_PATH];
-WCHAR parent_directory[MAX_PATH];
-WCHAR current_directory[MAX_PATH];
+char mark_directory[MAX_PATH];
+char parent_directory[MAX_PATH];
+char current_directory[MAX_PATH];
 
 int history_count = 0;
 int marked_files_count = 0;
@@ -148,12 +151,12 @@ bool pending_g = false;
 
 enum MarkStatus mark_status = MARKED;
 // =========================== Global Variables ==============================
-int main(void) {
+int main() {
     Initialize();
 
     do {
         DrawScreen();
-    } while (HandleInput());
+    } while(HandleInput());
 
     Cleanup();
 
@@ -163,189 +166,226 @@ int main(void) {
 void Initialize() {
     hIn = GetStdHandle(STD_INPUT_HANDLE);
     hOriginal = GetStdHandle(STD_OUTPUT_HANDLE);
-    GetConsoleMode(hIn, &original_input_mode);
 
-    // Create an alternate screen buffer sized to the visible window so that
-    // buffer coordinates and window coordinates always agree
+    // Create an alternate screen buffer
     hAlt = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, 0, NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
-    if (hAlt == INVALID_HANDLE_VALUE) {
-        hAlt = hOriginal; // Degrade gracefully: draw into the main buffer
-    }
-
-    CONSOLE_SCREEN_BUFFER_INFO info;
-    if (GetConsoleScreenBufferInfo(hOriginal, &info)) {
-        COORD size = {
-            (SHORT)(info.srWindow.Right - info.srWindow.Left + 1),
-            (SHORT)(info.srWindow.Bottom - info.srWindow.Top + 1)
-        };
-        SetConsoleScreenBufferSize(hAlt, size);
-    }
     SetConsoleActiveScreenBuffer(hAlt);
 
-    ApplyInputMode();
+    // Set initial directory (copy into a separate buffer first --
+    // ChangeCurrentDirectory strcpy's into current_directory, and
+    // overlapping source/destination is undefined behavior)
+    char start_dir[MAX_PATH];
+    GetCurrentDirectory(MAX_PATH, start_dir);
+    ChangeCurrentDirectory(start_dir);
 
-    // Set initial directory (use a temp buffer: passing current_directory into
-    // ChangeCurrentDirectory would make it strcpy onto itself)
-    WCHAR initial_directory[MAX_PATH];
-    GetCurrentDirectoryW(MAX_PATH, initial_directory);
-    ChangeCurrentDirectory(initial_directory);
-}
-
-void ApplyInputMode() {
-    // ENABLE_WINDOW_INPUT delivers resize events so the screen redraws immediately.
-    // Re-applied after running vim, which may change console modes.
-    SetConsoleMode(hIn, (original_input_mode & ~ENABLE_PROCESSED_INPUT) | ENABLE_WINDOW_INPUT);
+    GetConsoleMode(hIn, &original_console_mode);
+    SetConsoleMode(hIn, original_console_mode & ~ENABLE_PROCESSED_INPUT);
 }
 
 void DrawScreen() {
     CONSOLE_SCREEN_BUFFER_INFO info;
-    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
+    GetConsoleScreenBufferInfo(hAlt, &info);
     int width = info.srWindow.Right - info.srWindow.Left + 1;
     int height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
-    // Too small to draw the two-pane layout safely
-    if (width < MIN_SCREEN_WIDTH || height < 1) return;
+    // Window too small to draw the layout safely
+    if (width < MIN_WINDOW_WIDTH || height < 1) {
+        return;
+    }
 
-    // Re-clamp scroll state against the *current* window height. The window may
-    // have shrunk since the last input, which previously caused the cursor write
-    // below to index past the end of the frame buffer.
+    // Re-clamp scroll state against the *current* window size. The window may
+    // have been resized since the last keypress, which would otherwise let the
+    // cursor draw below write past the end of the buffer.
     if (current_directory_file_count == 0) {
         selected_row = 0;
         top_row = 0;
+    } else {
+        if (selected_row >= current_directory_file_count) {
+            selected_row = current_directory_file_count - 1;
+        }
+        if (top_row > current_directory_file_count - height) {
+            top_row = current_directory_file_count - height;
+        }
+        if (top_row < 0) {
+            top_row = 0;
+        }
+        if (top_row > selected_row) {
+            top_row = selected_row;
+        }
+        if (selected_row - top_row >= height) {
+            top_row = selected_row - height + 1;
+        }
     }
-    if (selected_row < top_row) top_row = selected_row;
-    if (selected_row - top_row >= height) top_row = selected_row - height + 1;
-    if (top_row < 0) top_row = 0;
 
-    // Persistent frame buffer, grown on demand instead of malloc/free per frame
+    color = white;
+
+    // Persistent frame buffer, grown on demand
     static CHAR_INFO* buffer = NULL;
-    static int buffer_cells = 0;
-    if (width * height > buffer_cells) {
-        free(buffer);
-        buffer = (CHAR_INFO*)malloc((size_t)width * height * sizeof(CHAR_INFO));
-        buffer_cells = buffer ? width * height : 0;
+    static int buffer_capacity = 0;
+    if (width * height > buffer_capacity) {
+        CHAR_INFO* new_buffer = (CHAR_INFO*)realloc(buffer, width * height * sizeof(CHAR_INFO));
+        if (new_buffer == NULL) {
+            return;
+        }
+        buffer = new_buffer;
+        buffer_capacity = width * height;
     }
-    if (!buffer) return;
 
     // Fill with spaces and default color
     for (int i = 0; i < width * height; i++) {
         buffer[i].Char.UnicodeChar = L' ';
-        buffer[i].Attributes = COLOR_WHITE;
+        buffer[i].Attributes = color;
     }
+
+    wchar_t wname[MAX_PATH];
 
     // ============================= Draw Parent Directory =============================
     for (int i = 0; i < height && i < parent_directory_file_count; i++) {
-        WORD color = IsDirectory(&parent_directory_files[i]) ? COLOR_BLUE : COLOR_WHITE;
-        WCHAR* file_name = parent_directory_files[i].cFileName;
-        int len = (int)wcslen(file_name);
+        int file_index = i;
+
+        if (IsDirectory(&parent_directory_files[file_index])) {
+            color = blue;
+        } else {
+            color = white;
+        }
+
+        AnsiToWide(parent_directory_files[file_index].cFileName, wname, MAX_PATH);
+        int len = (int)wcslen(wname);
 
         for (int col = 0; col < len && col < COLUMN_DIVIDER_POSITION - 2; col++) {
             int index = i * width + col;
-            buffer[index].Char.UnicodeChar = file_name[col];
+            buffer[index].Char.UnicodeChar = wname[col];
             buffer[index].Attributes = color;
         }
     }
     // ============================= Draw Parent Directory =============================
 
     // ============================= Draw Column Divider ===============================
+    color = blue;
     for (int i = 0; i < height; i++) {
         int index = i * width + COLUMN_DIVIDER_POSITION;
         buffer[index].Char.UnicodeChar = BOX_VERTICAL;
-        buffer[index].Attributes = COLOR_BLUE;
+        buffer[index].Attributes = color;
     }
     // ============================= Draw Column Divider ===============================
 
     // ============================= Draw Current Directory ============================
-    if (current_directory_file_count == 0) {
-        WriteToBuffer(buffer, width, 0, COLUMN_DIVIDER_POSITION + 4, L"(empty)", COLOR_GRAY);
-    }
-
     for (int i = 0; i < height && top_row + i < current_directory_file_count; i++) {
         int file_index = top_row + i;
-        WORD color = IsDirectory(&current_directory_files[file_index]) ? COLOR_BLUE : COLOR_WHITE;
-        WCHAR* file_name = current_directory_files[file_index].cFileName;
-        int len = (int)wcslen(file_name);
+
+        if (IsDirectory(&current_directory_files[file_index])) {
+            color = blue;
+        } else {
+            color = white;
+        }
+
+        AnsiToWide(current_directory_files[file_index].cFileName, wname, MAX_PATH);
+        int len = (int)wcslen(wname);
 
         for (int col = 0; col < len && col + COLUMN_DIVIDER_POSITION + 4 < width; col++) {
             int index = i * width + COLUMN_DIVIDER_POSITION + 4 + col;
-            buffer[index].Char.UnicodeChar = file_name[col];
+            buffer[index].Char.UnicodeChar = wname[col];
             buffer[index].Attributes = color;
         }
-    }
 
-    // ================== Highlight marked files in the current directory ==================
-    if (MarkDirEqualToCurrentDir()) {
-        WCHAR glyph = (mark_status == MARKED) ? L'*' : (mark_status == YANKED) ? L'Y' : L'X';
-        for (int j = 0; j < marked_files_count; j++) {
-            int marked_row = marked_files[j].row;
-            if (marked_row >= top_row && marked_row < top_row + height) {
-                int index = (marked_row - top_row) * width + COLUMN_DIVIDER_POSITION + 1;
-                buffer[index].Char.UnicodeChar = glyph;
-                buffer[index].Attributes = COLOR_WHITE;
+        // ================== Highlight marked files in the current directory ==================
+        // Matched by path, not row index, so highlights survive directory
+        // reloads and re-sorting
+        if (marked_files_count > 0 && MarkDirEqualToCurrentDir()) {
+            char row_path[MAX_PATH];
+            GetFilePath(current_directory, &current_directory_files[file_index], row_path);
+
+            for (int j = 0; j < marked_files_count; j++) {
+                if (strcmp(marked_files[j].path, row_path) == 0) {
+                    int mark_index = i * width + COLUMN_DIVIDER_POSITION + 1;
+
+                    if (mark_status == MARKED) {
+                        buffer[mark_index].Char.UnicodeChar = L'*';
+                    } else if (mark_status == YANKED) {
+                        buffer[mark_index].Char.UnicodeChar = L'Y';
+                    } else if (mark_status == CUT) {
+                        buffer[mark_index].Char.UnicodeChar = L'X';
+                    }
+
+                    buffer[mark_index].Attributes = white;
+                    break;
+                }
             }
         }
+        // ================== Highlight marked files in the current directory ==================
     }
-    // ================== Highlight marked files in the current directory ==================
     // ============================= Draw Current Directory ============================
 
-    // Draw the cursor
+    // Draw the cursor (skip in empty directories -- there is nothing to point at)
     if (current_directory_file_count > 0) {
         int index = (selected_row - top_row) * width + COLUMN_DIVIDER_POSITION + 2;
         buffer[index].Char.UnicodeChar = L'>';
-        buffer[index].Attributes = COLOR_WHITE;
+        buffer[index].Attributes = white;
     }
 
     COORD buffer_size = { (SHORT)width, (SHORT)height };
     COORD origin = { 0, 0 };
-    SMALL_RECT region = { 0, 0, (SHORT)(width - 1), (SHORT)(height - 1) };
+    // Anchor the write region to the visible window rather than the buffer
+    // origin, so drawing stays correct even if the two ever diverge
+    SMALL_RECT region = {
+        info.srWindow.Left,
+        info.srWindow.Top,
+        (SHORT)(info.srWindow.Left + width - 1),
+        (SHORT)(info.srWindow.Top + height - 1)
+    };
     WriteConsoleOutputW(hAlt, buffer, buffer_size, origin, &region);
 
-    COORD cursor_position = { (SHORT)(COLUMN_DIVIDER_POSITION + 4), (SHORT)(selected_row - top_row) };
+    COORD cursor_position = {
+        (SHORT)(info.srWindow.Left + COLUMN_DIVIDER_POSITION + 4),
+        (SHORT)(info.srWindow.Top + selected_row - top_row)
+    };
     SetConsoleCursorPosition(hAlt, cursor_position);
 }
 
 int HandleInput() {
     INPUT_RECORD input;
     DWORD events;
-    ReadConsoleInputW(hIn, &input, 1, &events);
+    ReadConsoleInput(hIn, &input, 1, &events);
 
     if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) {
-        return 1; // Ignore non-key events (resize events land here and trigger a redraw)
+        return 1; // Ignore non-key events (window resize lands here and triggers a redraw)
     }
 
     BOOL ctrl = input.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
-    BOOL shift = input.Event.KeyEvent.dwControlKeyState & SHIFT_PRESSED;
-    WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+    BOOL shift= input.Event.KeyEvent.dwControlKeyState & SHIFT_PRESSED;
 
     if (shift) {
         pending_g = false;
-        if (vk == 'G') {
-            // Jump by the full list length; ModifySelectedRow clamps to the bottom
+        if (input.Event.KeyEvent.wVirtualKeyCode == 'G') {
+            // Jump to bottom: any magnitude >= file count clamps to the last row
             ModifySelectedRow(current_directory_file_count);
         }
     }
     else if (ctrl) {
         pending_g = false;
-        switch (vk) {
+
+        int half_page = GetVisibleRows() / 2;
+        if (half_page < 1) half_page = 1;
+
+        switch (input.Event.KeyEvent.wVirtualKeyCode) {
             case 'D': {
-                int half = GetVisibleRows() / 2;
-                ModifySelectedRow(half > 0 ? half : 1); // Half page down
+                ModifySelectedRow(half_page);
                 break;
             }
             case 'U': {
-                int half = GetVisibleRows() / 2;
-                ModifySelectedRow(half > 0 ? -half : -1); // Half page up
+                ModifySelectedRow(-half_page);
                 break;
             }
             case 'A': {
                 if (current_directory_file_count == 0) break;
 
                 ClearMarkedFiles();
-                wcscpy(mark_directory, current_directory);
+                strcpy(mark_directory, current_directory);
 
+                // GetFilesInDirectory caps the listing at MAX_FILES, so this
+                // cannot overflow marked_files
                 for (int i = 0; i < current_directory_file_count; i++) {
                     GetFilePath(current_directory, &current_directory_files[i], marked_files[i].path);
-                    marked_files[i].row = i;
                 }
                 marked_files_count = current_directory_file_count;
                 break;
@@ -360,21 +400,22 @@ int HandleInput() {
         bool was_g = pending_g;
         pending_g = false;
 
-        switch (vk) {
+        switch (input.Event.KeyEvent.wVirtualKeyCode) {
             case 'A': {
                 HandleCreate();
                 break;
             }
             case 'H': {
-                if (parent_directory[0] != L'\0') {
+                if (parent_directory[0] != '\0') {
                     ChangeCurrentDirectory(parent_directory);
                 }
                 break;
             }
             case 'L': {
                 if (current_directory_file_count == 0) break;
+
                 if (IsDirectory(&current_directory_files[selected_row])) {
-                    WCHAR selected_directory_path[MAX_PATH];
+                    char selected_directory_path[MAX_PATH];
                     GetSelectedRowPath(selected_row, selected_directory_path);
                     ChangeCurrentDirectory(selected_directory_path);
                 }
@@ -414,20 +455,14 @@ int HandleInput() {
                 break;
             }
             case 'D': {
-                bool auto_marked = false;
+                if (current_directory_file_count == 0) break;
 
-                if (!(IsMarkDirectorySet() && MarkDirEqualToCurrentDir() && marked_files_count > 0)) {
-                    if (current_directory_file_count == 0) break;
+                if (!IsMarkDirectorySet() || !MarkDirEqualToCurrentDir()) {
                     ClearMarkedFiles();
-                    wcscpy(mark_directory, current_directory);
+                    strcpy(mark_directory, current_directory);
                     ToggleMark();
-                    auto_marked = true;
                 }
-
-                // Cancelling keeps a pre-existing mark set; only the auto-mark is reverted
-                if (!ConfirmDelete() && auto_marked) {
-                    ClearMarkedFiles();
-                }
+                ConfirmDelete();
                 break;
             }
             case 'O': {
@@ -439,7 +474,7 @@ int HandleInput() {
 
                 if (!IsMarkDirectorySet() || !MarkDirEqualToCurrentDir()) {
                     ClearMarkedFiles();
-                    wcscpy(mark_directory, current_directory);
+                    strcpy(mark_directory, current_directory);
                 }
 
                 ToggleMark();
@@ -448,39 +483,9 @@ int HandleInput() {
             }
             case VK_RETURN: {
                 if (current_directory_file_count == 0) break;
-                if (IsDirectory(&current_directory_files[selected_row])) break;
 
-                WCHAR file_path[MAX_PATH];
-                GetSelectedRowPath(selected_row, file_path);
-
-                WCHAR command[MAX_PATH + 16];
-                StringCchPrintfW(command, ARRAYSIZE(command), L"vim \"%ls\"", file_path);
-
-                // Temporarily switch to the original buffer to run the editor
-                SetConsoleActiveScreenBuffer(hOriginal);
-
-                STARTUPINFOW si = {0};
-                si.cb = sizeof(si);
-                PROCESS_INFORMATION pi = {0};
-                bool opened = false;
-
-                // CreateProcess searches PATH and does no cmd-style %VAR% expansion
-                if (CreateProcessW(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-                    WaitForSingleObject(pi.hProcess, INFINITE);
-                    CloseHandle(pi.hThread);
-                    CloseHandle(pi.hProcess);
-                    opened = true;
-                } else {
-                    // vim not found - fall back to the default application
-                    opened = (INT_PTR)ShellExecuteW(NULL, L"open", file_path, NULL, NULL, SW_SHOWNORMAL) > 32;
-                }
-
-                SetConsoleActiveScreenBuffer(hAlt);
-                ApplyInputMode();       // vim may have altered console modes
-                LoadCurrentDirectory(); // pick up files created/changed by the editor
-
-                if (!opened) {
-                    ShowMessage(L"Could not open file.");
+                if (!IsDirectory(&current_directory_files[selected_row])) {
+                    OpenFileInEditor();
                 }
                 break;
             }
@@ -496,79 +501,120 @@ int HandleInput() {
     return 1;
 }
 
+void OpenFileInEditor() {
+    char file_path[MAX_PATH];
+    GetSelectedRowPath(selected_row, file_path);
+
+    char command[MAX_PATH + 16];
+    snprintf(command, sizeof(command), "vim \"%s\"", file_path);
+
+    // Temporarily switch to the original buffer and restore the console mode
+    // for the child process
+    SetConsoleActiveScreenBuffer(hOriginal);
+    SetConsoleMode(hIn, original_console_mode);
+
+    // CreateProcess instead of system(): avoids cmd.exe %VAR% expansion
+    // inside quoted paths, and still searches PATH for vim
+    STARTUPINFO si = {0};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi;
+
+    if (CreateProcess(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    } else {
+        // vim not found -- fall back to the default application
+        ShellExecute(NULL, "open", file_path, NULL, NULL, SW_SHOWNORMAL);
+    }
+
+    SetConsoleMode(hIn, original_console_mode & ~ENABLE_PROCESSED_INPUT);
+    SetConsoleActiveScreenBuffer(hAlt);
+
+    // The editor may have written new files
+    ReloadCurrentDirectory();
+}
+
 void HandleMarkOperation(enum MarkStatus new_status) {
-    // If there is a valid mark set in this directory, Y/X apply to it.
-    // Otherwise mark the cursor line and apply to that.
-    if (marked_files_count == 0 || !MarkDirEqualToCurrentDir()) {
-        if (current_directory_file_count == 0) return;
+    if (current_directory_file_count == 0) return;
+
+    // If marks already exist in this directory, operate on them as-is.
+    // Otherwise mark the cursor line. (No special case for a single mark --
+    // that previously cleared the marked file and yanked the cursor line
+    // instead.)
+    if (!IsMarkDirectorySet() || !MarkDirEqualToCurrentDir() || marked_files_count == 0) {
         ClearMarkedFiles();
-        wcscpy(mark_directory, current_directory);
+        strcpy(mark_directory, current_directory);
         ToggleMark();
-        if (marked_files_count == 0) return;
     }
     SetMarkStatus(new_status);
 }
 
-WCHAR* BuildMarkedFileList() {
-    // Builds the double-null-terminated list SHFileOperation expects,
-    // so the whole batch is one operation (and one undo unit)
-    size_t total = 1;
+// Builds a double-null-terminated list of all marked paths for
+// SHFileOperation. Caller frees. Batching into one call gives a single
+// operation (and a single undo unit) instead of one per file.
+char* BuildFromList(size_t* out_size) {
+    size_t size = 1; // trailing extra null
     for (int i = 0; i < marked_files_count; i++) {
-        total += wcslen(marked_files[i].path) + 1;
+        size += strlen(marked_files[i].path) + 1;
     }
 
-    WCHAR* list = (WCHAR*)malloc(total * sizeof(WCHAR));
-    if (!list) return NULL;
+    char* from = (char*)malloc(size);
+    if (from == NULL) return NULL;
 
     size_t pos = 0;
     for (int i = 0; i < marked_files_count; i++) {
-        size_t len = wcslen(marked_files[i].path);
-        wcscpy(list + pos, marked_files[i].path);
+        size_t len = strlen(marked_files[i].path);
+        memcpy(from + pos, marked_files[i].path, len + 1);
         pos += len + 1;
     }
-    list[pos] = L'\0';
+    from[pos] = '\0';
 
-    return list;
+    if (out_size) *out_size = size;
+    return from;
 }
 
 void HandlePaste(int move) {
-    if (marked_files_count == 0 || !IsMarkDirectorySet()) return;
+    if (marked_files_count == 0) return;
 
-    // Cutting and pasting into the same directory is a no-op
+    // Moving files into their own directory is a no-op
     if (move && MarkDirEqualToCurrentDir()) {
         ClearMarkedFiles();
         return;
     }
 
-    WCHAR* source_list = BuildMarkedFileList();
-    if (!source_list) return;
+    char* from = BuildFromList(NULL);
+    if (from == NULL) return;
 
-    WCHAR destination[MAX_PATH + 2];
-    wcscpy(destination, current_directory);
-    destination[wcslen(destination) + 1] = L'\0'; // double-null terminate
+    // Destination is the directory itself, double-null-terminated
+    char to[MAX_PATH + 2];
+    strcpy(to, current_directory);
+    to[strlen(to) + 1] = '\0';
 
-    SHFILEOPSTRUCTW op = {0};
+    SHFILEOPSTRUCT op = {0};
     op.wFunc = move ? FO_MOVE : FO_COPY;
-    op.pFrom = source_list;
-    op.pTo = destination;
-    op.fFlags = FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_RENAMEONCOLLISION;
+    op.pFrom = from;
+    op.pTo = to;
+    // FOF_RENAMEONCOLLISION: name collisions produce "Copy of ..." instead of
+    // silently overwriting the existing file
+    op.fFlags = FOF_NOCONFIRMATION | FOF_SILENT | FOF_RENAMEONCOLLISION;
 
-    int result = SHFileOperationW(&op);
-    bool aborted = op.fAnyOperationsAborted;
+    SHFileOperation(&op);
+    free(from);
 
-    free(source_list);
-
-    LoadCurrentDirectory();
+    ReloadCurrentDirectory();
     ClearMarkedFiles();
-
-    if (result != 0 || aborted) {
-        ShowMessage(L"Some files could not be pasted.");
-    }
 }
 
 void ToggleMark() {
+    if (current_directory_file_count == 0) return;
+
+    char full_path[MAX_PATH];
+    GetFilePath(current_directory, &current_directory_files[selected_row], full_path);
+
+    // Match by path so marks stay consistent across reloads
     for (int i = 0; i < marked_files_count; i++) {
-        if (marked_files[i].row == selected_row) {
+        if (strcmp(marked_files[i].path, full_path) == 0) {
             // Unmark
             for (int j = i; j < marked_files_count - 1; j++) {
                 marked_files[j] = marked_files[j + 1];
@@ -584,80 +630,80 @@ void ToggleMark() {
 
     // Mark
     if (!MarkedFilesFull()) {
-        GetFilePath(current_directory, &current_directory_files[selected_row], marked_files[marked_files_count].path);
-        marked_files[marked_files_count].row = selected_row;
+        strcpy(marked_files[marked_files_count].path, full_path);
         marked_files_count++;
 
-        wcscpy(mark_directory, current_directory);
+        strcpy(mark_directory, current_directory);
     }
 }
 
-void ChangeCurrentDirectory(WCHAR* path) {
+void ChangeCurrentDirectory(char* path) {
     SaveDirectoryState();
 
-    wcscpy(current_directory, path);
+    strcpy(current_directory, path);
     LoadCurrentDirectory();
     if (!IsRootDirectory(current_directory)) {
         LoadParentDirectory();
     } else {
-        parent_directory[0] = L'\0';
+        parent_directory[0] = '\0';
         parent_directory_file_count = 0;
     }
 
     RestoreDirectoryState();
 }
 
-void GetParentDirectory(WCHAR* path, WCHAR* parent) {
-    wcscpy(parent, path);
+void GetParentDirectory(char* path, char* parent) {
+    strcpy(parent, path);
 
-    WCHAR* last_slash = wcsrchr(parent, L'\\');
+    char* last_slash = strrchr(parent, '\\');
     if (last_slash == NULL) {
         // No slash found, treat as root
-        parent[0] = L'\0';
-    } else if (last_slash == parent + 2 && parent[1] == L':') {
+        parent[0] = '\0';
+    } else if (last_slash == parent + 2 && parent[1] == ':') {
         // Handle root directory case (e.g., "C:\")
-        *(last_slash + 1) = L'\0';
+        *(last_slash + 1) = '\0';
     }
     else {
-        *last_slash = L'\0';
+        *last_slash = '\0';
     }
 }
 
 int CompareFiles(const void* a, const void* b) {
-    const WIN32_FIND_DATAW* fa = (const WIN32_FIND_DATAW*)a;
-    const WIN32_FIND_DATAW* fb = (const WIN32_FIND_DATAW*)b;
+    const WIN32_FIND_DATA* fa = (const WIN32_FIND_DATA*)a;
+    const WIN32_FIND_DATA* fb = (const WIN32_FIND_DATA*)b;
 
     bool dir_a = (fa->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     bool dir_b = (fb->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 
+    // Directories first, then case-insensitive by name
     if (dir_a != dir_b) {
-        return dir_b - dir_a; // directories first
+        return dir_a ? -1 : 1;
     }
-    return _wcsicmp(fa->cFileName, fb->cFileName);
+    return _stricmp(fa->cFileName, fb->cFileName);
 }
 
-int GetFilesInDirectory(WCHAR* path, WIN32_FIND_DATAW files[]) {
-    WCHAR search_path[MAX_PATH];
-    JoinPath(search_path, path, L"*");
+int GetFilesInDirectory(char* path, WIN32_FIND_DATA files[]) {
+    char search_path[MAX_PATH];
+    snprintf(search_path, MAX_PATH, "%s\\*", path);
 
-    WIN32_FIND_DATAW fd;
-    HANDLE hFind = FindFirstFileW(search_path, &fd);
+    WIN32_FIND_DATA fd;
+    HANDLE hFind = FindFirstFile(search_path, &fd);
 
     int count = 0;
 
     if (hFind != INVALID_HANDLE_VALUE) {
         do {
-            if (wcscmp(fd.cFileName, L".") == 0) continue;
-            if (wcscmp(fd.cFileName, L"..") == 0) continue;
+            if (strcmp(fd.cFileName, ".") == 0) continue;
+            if (strcmp(fd.cFileName, "..") == 0) continue;
 
             files[count] = fd;
             count++;
-        } while (FindNextFileW(hFind, &fd) && count < MAX_FILES);
+        } while (FindNextFile(hFind, &fd) && count < MAX_FILES);
 
         FindClose(hFind);
     }
 
-    qsort(files, count, sizeof(WIN32_FIND_DATAW), CompareFiles);
+    qsort(files, count, sizeof(WIN32_FIND_DATA), CompareFiles);
 
     return count;
 }
@@ -717,9 +763,9 @@ void ModifySelectedRow(int num) {
 
 
 void SaveDirectoryState() {
-    // Check if the current directory is already in history
+    // check if the current directory is already in history
     for (int i = 0; i < history_count; i++) {
-        if (wcscmp(history[i].path, current_directory) == 0) {
+        if (strcmp(history[i].path, current_directory) == 0) {
             history[i].selected_row = selected_row;
             history[i].top_row = top_row;
             return;
@@ -728,7 +774,7 @@ void SaveDirectoryState() {
 
     // Add new entry to history
     if (history_count < MAX_FILES) {
-        wcscpy(history[history_count].path, current_directory);
+        strcpy(history[history_count].path, current_directory);
         history[history_count].selected_row = selected_row;
         history[history_count].top_row = top_row;
         history_count++;
@@ -737,7 +783,7 @@ void SaveDirectoryState() {
 
 void RestoreDirectoryState() {
     for (int i = 0; i < history_count; i++) {
-        if (wcscmp(history[i].path, current_directory) == 0) {
+        if (strcmp(history[i].path, current_directory) == 0) {
             selected_row = history[i].selected_row;
             top_row = history[i].top_row;
 
@@ -755,28 +801,29 @@ void RestoreDirectoryState() {
     top_row = 0;
 }
 
-bool ConfirmDelete() {
-    if (marked_files_count == 0) return false;
+void ConfirmDelete() {
+    if (marked_files_count == 0) return;
 
     CONSOLE_SCREEN_BUFFER_INFO info;
     GetConsoleScreenBufferInfo(hAlt, &info);
     int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
     int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
-    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(DELETE_POPUP_WIDTH * DELETE_POPUP_HEIGHT * sizeof(CHAR_INFO));
-    if (!popup_buffer) return false;
-    DrawDeletePopup(DELETE_POPUP_WIDTH, DELETE_POPUP_HEIGHT, popup_buffer);
+    if (screen_width < POPUP_WIDTH || screen_height < POPUP_HEIGHT) return;
+
+    // Create popup buffer
+    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(POPUP_WIDTH * POPUP_HEIGHT * sizeof(CHAR_INFO));
+    if (popup_buffer == NULL) return;
+    DrawDeletePopup(POPUP_WIDTH, POPUP_HEIGHT, popup_buffer);
 
     // Center the popup on screen
-    int start_col = (screen_width - DELETE_POPUP_WIDTH) / 2;
-    int start_row = (screen_height - DELETE_POPUP_HEIGHT) / 2;
-    if (start_col < 0) start_col = 0;
-    if (start_row < 0) start_row = 0;
+    int start_col = info.srWindow.Left + (screen_width - POPUP_WIDTH) / 2;
+    int start_row = info.srWindow.Top + (screen_height - POPUP_HEIGHT) / 2;
 
-    COORD buffer_size = { DELETE_POPUP_WIDTH, DELETE_POPUP_HEIGHT };
+    COORD buffer_size = { POPUP_WIDTH, POPUP_HEIGHT };
     COORD origin = { 0, 0 };
     SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
-                          (SHORT)(start_col + DELETE_POPUP_WIDTH - 1), (SHORT)(start_row + DELETE_POPUP_HEIGHT - 1) };
+                          (SHORT)(start_col + POPUP_WIDTH - 1), (SHORT)(start_row + POPUP_HEIGHT - 1) };
     WriteConsoleOutputW(hAlt, popup_buffer, buffer_size, origin, &region);
 
     free(popup_buffer);
@@ -785,166 +832,147 @@ bool ConfirmDelete() {
     while (1) {
         INPUT_RECORD input;
         DWORD events;
-        ReadConsoleInputW(hIn, &input, 1, &events);
+        ReadConsoleInput(hIn, &input, 1, &events);
 
         if (input.EventType == KEY_EVENT && input.Event.KeyEvent.bKeyDown) {
             if (input.Event.KeyEvent.wVirtualKeyCode == 'Y') {
-                WCHAR* source_list = BuildMarkedFileList();
-                if (!source_list) return false;
+                char* from = BuildFromList(NULL);
+                if (from != NULL) {
+                    SHFILEOPSTRUCT op = {0};
+                    op.wFunc = FO_DELETE;
+                    op.pFrom = from;
+                    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
 
-                SHFILEOPSTRUCTW op = {0};
-                op.wFunc = FO_DELETE;
-                op.pFrom = source_list;
-                op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI;
-
-                int result = SHFileOperationW(&op);
-                bool aborted = op.fAnyOperationsAborted;
-
-                free(source_list);
-
-                LoadCurrentDirectory();
-                ClearMarkedFiles();
-
-                if (result != 0 || aborted) {
-                    ShowMessage(L"Some files could not be deleted.");
+                    SHFileOperation(&op);
+                    free(from);
                 }
-                return true;
+
+                ClearMarkedFiles();
+                ReloadCurrentDirectory();
+                break;
             } else if (input.Event.KeyEvent.wVirtualKeyCode == 'N' ||
                        input.Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE) {
-                return false; // Marks are kept on cancel
+                // Cancelling keeps the marks -- the user built that set on purpose
+                break;
             }
         }
     }
 }
 
-void DrawBox(CHAR_INFO* buffer, int width, int height) {
-    // Fill background with spaces
+void DrawDeletePopup(int width, int height, CHAR_INFO* out_buffer) {
+    // 1. Fill background with spaces
     for (int i = 0; i < width * height; i++) {
-        buffer[i].Char.UnicodeChar = L' ';
-        buffer[i].Attributes = COLOR_WHITE;
+        out_buffer[i].Char.UnicodeChar = L' ';
+        out_buffer[i].Attributes = white;
     }
 
-    // Corners
+    // 2. Draw border - corners
+    out_buffer[0].Char.UnicodeChar = BOX_TOP_LEFT;
+    out_buffer[width - 1].Char.UnicodeChar = BOX_TOP_RIGHT;
     int bottom = (height - 1) * width;
-    buffer[0].Char.UnicodeChar = BOX_TOP_LEFT;
-    buffer[width - 1].Char.UnicodeChar = BOX_TOP_RIGHT;
-    buffer[bottom].Char.UnicodeChar = BOX_BOTTOM_LEFT;
-    buffer[bottom + width - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
+    out_buffer[bottom].Char.UnicodeChar = BOX_BOTTOM_LEFT;
+    out_buffer[bottom + width - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
 
     // Top and bottom edges
     for (int col = 1; col < width - 1; col++) {
-        buffer[col].Char.UnicodeChar = BOX_HORIZONTAL;
-        buffer[bottom + col].Char.UnicodeChar = BOX_HORIZONTAL;
+        out_buffer[col].Char.UnicodeChar = BOX_HORIZONTAL;
+        out_buffer[bottom + col].Char.UnicodeChar = BOX_HORIZONTAL;
     }
 
     // Left and right edges
     for (int row = 1; row < height - 1; row++) {
-        buffer[row * width].Char.UnicodeChar = BOX_VERTICAL;
-        buffer[row * width + width - 1].Char.UnicodeChar = BOX_VERTICAL;
+        out_buffer[row * width].Char.UnicodeChar = BOX_VERTICAL;
+        out_buffer[row * width + width - 1].Char.UnicodeChar = BOX_VERTICAL;
     }
-}
 
-void DrawDeletePopup(int width, int height, CHAR_INFO* out_buffer) {
-    DrawBox(out_buffer, width, height);
+    // 3. Title (row 1, centered)
+    char* title = "Confirm Delete?";
+    int title_col = (width - (int)strlen(title)) / 2;
+    WriteToBuffer(out_buffer, width, 1, title_col, title, red);
 
-    // Title (row 1, centered)
-    const WCHAR* title = L"Confirm Delete?";
-    int title_col = (width - (int)wcslen(title)) / 2;
-    WriteToBuffer(out_buffer, width, 1, title_col, title, COLOR_RED);
+    // 4. Item count (row 3)
+    char count_msg[50];
+    snprintf(count_msg, sizeof(count_msg), "%d item(s) will be deleted:", marked_files_count);
+    WriteToBuffer(out_buffer, width, 3, 2, count_msg, white);
 
-    // Item count (row 3)
-    WCHAR count_msg[50];
-    StringCchPrintfW(count_msg, ARRAYSIZE(count_msg), L"%d item(s) will be deleted:", marked_files_count);
-    WriteToBuffer(out_buffer, width, 3, 2, count_msg, COLOR_WHITE);
-
-    // File names (rows 5-9, max 5 items)
+    // 5. File names (rows 5-9, max 5 items)
     int max_display = 5;
     for (int i = 0; i < marked_files_count && i < max_display; i++) {
-        WCHAR* name = wcsrchr(marked_files[i].path, L'\\');
-        name = name ? name + 1 : marked_files[i].path;
-        WriteToBuffer(out_buffer, width, 5 + i, 4, name, COLOR_WHITE);
+        char* name = strrchr(marked_files[i].path, '\\');
+        if (name) {
+            name++;
+        } else {
+            name = marked_files[i].path;
+        }
+        WriteToBuffer(out_buffer, width, 5 + i, 4, name, white);
     }
 
-    // "...and N more" if needed
+    // 6. "...and N more" if needed
     if (marked_files_count > max_display) {
-        WCHAR more_msg[30];
-        StringCchPrintfW(more_msg, ARRAYSIZE(more_msg), L"...and %d more", marked_files_count - max_display);
-        WriteToBuffer(out_buffer, width, 5 + max_display, 4, more_msg, COLOR_WHITE);
+        char more_msg[30];
+        snprintf(more_msg, sizeof(more_msg), "...and %d more", marked_files_count - max_display);
+        WriteToBuffer(out_buffer, width, 5 + max_display, 4, more_msg, white);
     }
 
-    // Y/N options (bottom rows)
-    WriteToBuffer(out_buffer, width, height - 4, 2, L"[Y] Yes - Move to Recycle Bin", COLOR_WHITE);
-    WriteToBuffer(out_buffer, width, height - 3, 2, L"[N] No - Cancel", COLOR_WHITE);
+    // 7. Y/N options (bottom rows)
+    WriteToBuffer(out_buffer, width, height - 4, 2, "[Y] Yes - Move to Recycle Bin", white);
+    WriteToBuffer(out_buffer, width, height - 3, 2, "[N] No - Cancel", white);
 }
 
-void ShowMessage(const WCHAR* msg) {
-    CONSOLE_SCREEN_BUFFER_INFO info;
-    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
-    int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
-    int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
-
-    int width = (int)wcslen(msg) + 6;
-    if (width > screen_width - 2) width = screen_width - 2;
-    if (width < 10) return;
+void DrawCreatePopup(int width, char* input_text, CHAR_INFO* out_buffer) {
     int height = 3;
 
-    CHAR_INFO* buffer = (CHAR_INFO*)malloc(width * height * sizeof(CHAR_INFO));
-    if (!buffer) return;
-
-    DrawBox(buffer, width, height);
-    WriteToBuffer(buffer, width, 1, 2, msg, COLOR_WHITE);
-
-    int start_col = (screen_width - width) / 2;
-    int start_row = (screen_height - height) / 2;
-
-    COORD buffer_size = { (SHORT)width, (SHORT)height };
-    COORD origin = { 0, 0 };
-    SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
-                          (SHORT)(start_col + width - 1), (SHORT)(start_row + height - 1) };
-    WriteConsoleOutputW(hAlt, buffer, buffer_size, origin, &region);
-
-    free(buffer);
-
-    // Wait for any key
-    while (1) {
-        INPUT_RECORD input;
-        DWORD events;
-        ReadConsoleInputW(hIn, &input, 1, &events);
-        if (input.EventType == KEY_EVENT && input.Event.KeyEvent.bKeyDown) break;
+    // Fill background
+    for (int i = 0; i < width * height; i++) {
+        out_buffer[i].Char.UnicodeChar = L' ';
+        out_buffer[i].Attributes = white;
     }
-}
 
-void DrawCreatePopup(int width, WCHAR* input_text, CHAR_INFO* out_buffer) {
-    DrawBox(out_buffer, width, 3);
-    WriteToBuffer(out_buffer, width, 1, 2, L"Name: ", COLOR_WHITE);
-    WriteToBuffer(out_buffer, width, 1, 8, input_text, COLOR_WHITE);
+    // Top border
+    out_buffer[0].Char.UnicodeChar = BOX_TOP_LEFT;
+    for (int col = 1; col < width - 1; col++) {
+        out_buffer[col].Char.UnicodeChar = BOX_HORIZONTAL;
+    }
+    out_buffer[width - 1].Char.UnicodeChar = BOX_TOP_RIGHT;
+
+    // Middle row - edges
+    out_buffer[width].Char.UnicodeChar = BOX_VERTICAL;
+    out_buffer[width * 2 - 1].Char.UnicodeChar = BOX_VERTICAL;
+
+    // Bottom border
+    int bottom = 2 * width;
+    out_buffer[bottom].Char.UnicodeChar = BOX_BOTTOM_LEFT;
+    for (int col = 1; col < width - 1; col++) {
+        out_buffer[bottom + col].Char.UnicodeChar = BOX_HORIZONTAL;
+    }
+    out_buffer[bottom + width - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
+
+    // Label and input
+    WriteToBuffer(out_buffer, width, 1, 2, "Name: ", white);
+    WriteToBuffer(out_buffer, width, 1, 8, input_text, white);
 }
 
 void HandleCreate() {
-    WCHAR name[MAX_PATH];
-    name[0] = L'\0';
+    char name[MAX_PATH];
+    name[0] = '\0';
     int pos = 0;
+
+    int popup_h = 3;
 
     CONSOLE_SCREEN_BUFFER_INFO info;
     GetConsoleScreenBufferInfo(hAlt, &info);
     int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
     int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
-    // Size the popup to the window instead of a fixed 35 columns
-    int popup_w = screen_width - 10;
-    if (popup_w > 70) popup_w = 70;
-    if (popup_w < 30) popup_w = 30;
-    if (popup_w > screen_width - 2) return;
-    int popup_h = 3;
+    int popup_w = CREATE_POPUP_WIDTH;
+    if (popup_w > screen_width - 2) popup_w = screen_width - 2;
+    if (popup_w < 14 || screen_height < popup_h) return;
 
-    int max_name_len = popup_w - 10;
-    if (max_name_len > MAX_PATH - 1) max_name_len = MAX_PATH - 1;
-
-    int start_col = (screen_width - popup_w) / 2;
-    int start_row = (screen_height - popup_h) / 2;
+    int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
+    int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
 
     CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
-    if (!popup_buffer) return;
+    if (popup_buffer == NULL) return;
 
     while (1) {
         // Draw popup
@@ -963,96 +991,102 @@ void HandleCreate() {
         // Get input
         INPUT_RECORD input;
         DWORD events;
-        ReadConsoleInputW(hIn, &input, 1, &events);
+        ReadConsoleInput(hIn, &input, 1, &events);
 
         if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) {
             continue;
         }
 
         WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
-        WCHAR c = input.Event.KeyEvent.uChar.UnicodeChar;
+        char c = input.Event.KeyEvent.uChar.AsciiChar;
 
         if (vk == VK_RETURN) {
             break;
         } else if (vk == VK_ESCAPE) {
-            name[0] = L'\0';
+            name[0] = '\0';
             break;
         } else if (vk == VK_BACK && pos > 0) {
             pos--;
-            name[pos] = L'\0';
-        } else if (c >= 32 && c != 127 && pos < max_name_len) {
+            name[pos] = '\0';
+        } else if (c >= 32 && c < 127 && pos < popup_w - 10) {
             name[pos] = c;
             pos++;
-            name[pos] = L'\0';
+            name[pos] = '\0';
         }
     }
 
     free(popup_buffer);
 
-    if (name[0] == L'\0') return;
+    if (name[0] == '\0') return;
 
-    size_t len = wcslen(name);
-    bool is_directory = name[len - 1] == L'\\';
+    // Strip the trailing backslash (directory marker) before building the path
+    // so the name is also usable for the cursor lookup below
+    int len = (int)strlen(name);
+    bool is_directory = (name[len - 1] == '\\');
     if (is_directory) {
-        name[len - 1] = L'\0';
-        if (name[0] == L'\0') return; // name was just "\"
+        name[len - 1] = '\0';
+        if (name[0] == '\0') return;
     }
 
-    WCHAR full_path[MAX_PATH];
-    JoinPath(full_path, current_directory, name);
+    char full_path[MAX_PATH];
+    snprintf(full_path, MAX_PATH, "%s\\%s", current_directory, name);
 
     if (is_directory) {
-        if (!CreateDirectoryW(full_path, NULL)) {
-            ShowMessage(L"Could not create directory.");
-        }
+        CreateDirectory(full_path, NULL);
     } else {
-        HANDLE h = CreateFileW(full_path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        HANDLE h = CreateFile(full_path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             CloseHandle(h);
-        } else {
-            ShowMessage(L"Could not create file.");
         }
     }
 
-    LoadCurrentDirectory();
+    ReloadCurrentDirectory();
+
+    // Move the cursor to the newly created item
+    for (int i = 0; i < current_directory_file_count; i++) {
+        if (_stricmp(current_directory_files[i].cFileName, name) == 0) {
+            selected_row = i;
+            break;
+        }
+    }
 }
 
-int CalculateDistance(WCHAR* current, WCHAR* target) {
+int CalculateDistance(char* current, char* target) {
     // Check if target is below current (current is prefix of target)
-    size_t current_len = wcslen(current);
-    if (wcsncmp(current, target, current_len) == 0 &&
-        (target[current_len] == L'\\' || target[current_len] == L'\0')) {
+    int current_len = (int)strlen(current);
+    if (strncmp(current, target, current_len) == 0 &&
+        (target[current_len] == '\\' || target[current_len] == '\0')) {
         // Count slashes after current path
         int distance = 0;
-        for (size_t i = current_len; target[i] != L'\0'; i++) {
-            if (target[i] == L'\\') distance++;
+        for (int i = current_len; target[i] != '\0'; i++) {
+            if (target[i] == '\\') distance++;
         }
         return distance;
     }
 
     // Otherwise, find common ancestor
-    WCHAR temp[MAX_PATH];
-    wcscpy(temp, current);
+    char temp[MAX_PATH];
+    strcpy(temp, current);
     int steps_up = 0;
 
-    while (temp[0] != L'\0') {
-        size_t temp_len = wcslen(temp);
-        if (wcsncmp(temp, target, temp_len) == 0 &&
-            (target[temp_len] == L'\\' || target[temp_len] == L'\0')) {
+    while (temp[0] != '\0') {
+        int temp_len = (int)strlen(temp);
+        if (strncmp(temp, target, temp_len) == 0 &&
+            (target[temp_len] == '\\' || target[temp_len] == '\0')) {
             // Found common ancestor, count steps down
             int steps_down = 0;
-            for (size_t i = temp_len; target[i] != L'\0'; i++) {
-                if (target[i] == L'\\') steps_down++;
+            for (int i = temp_len; target[i] != '\0'; i++) {
+                if (target[i] == '\\') steps_down++;
             }
             return steps_up + steps_down;
         }
 
         // Cut off last directory
-        WCHAR* last_slash = wcsrchr(temp, L'\\');
+        char* last_slash = strrchr(temp, '\\');
         if (last_slash == NULL || last_slash == temp + 2) {
             break; // Hit root or different drive
         }
-        *last_slash = L'\0';
+        *last_slash = '\0';
         steps_up++;
     }
 
@@ -1069,9 +1103,7 @@ void HandleOldHistory() {
         distances[i].distance = CalculateDistance(current_directory, history[i].path);
     }
 
-    // Sort by distance, farthest first: nearby directories are cheap to reach
-    // with H/L, so the jump list prioritizes the expensive ones.
-    // (Flip the comparison to '>' for nearest-first.)
+    // Sort by distance (descending)
     for (int i = 0; i < history_count - 1; i++) {
         for (int j = 0; j < history_count - i - 1; j++) {
             if (distances[j].distance < distances[j + 1].distance) {
@@ -1091,16 +1123,17 @@ void HandleOldHistory() {
 
     int popup_height = display_count + 5;
     int popup_width = 60;
-    if (popup_width > screen_width - 2) popup_width = screen_width - 2;
-    if (popup_width < 20 || popup_height > screen_height) return;
+    if (popup_width > screen_width) popup_width = screen_width;
+    if (popup_width < 10 || screen_height < popup_height) return;
 
+    // Create popup buffer
     CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(popup_width * popup_height * sizeof(CHAR_INFO));
-    if (!popup_buffer) return;
+    if (popup_buffer == NULL) return;
     DrawOldHistoryPopup(popup_width, popup_height, distances, display_count, popup_buffer);
 
     // Center the popup on screen
-    int start_col = (screen_width - popup_width) / 2;
-    int start_row = (screen_height - popup_height) / 2;
+    int start_col = info.srWindow.Left + (screen_width - popup_width) / 2;
+    int start_row = info.srWindow.Top + (screen_height - popup_height) / 2;
 
     COORD buffer_size = { (SHORT)popup_width, (SHORT)popup_height };
     COORD origin = { 0, 0 };
@@ -1114,19 +1147,19 @@ void HandleOldHistory() {
     while (1) {
         INPUT_RECORD input;
         DWORD events;
-        ReadConsoleInputW(hIn, &input, 1, &events);
+        ReadConsoleInput(hIn, &input, 1, &events);
 
         if (input.EventType == KEY_EVENT && input.Event.KeyEvent.bKeyDown) {
-            WCHAR c = input.Event.KeyEvent.uChar.UnicodeChar;
+            char c = input.Event.KeyEvent.uChar.AsciiChar;
 
-            if (c >= L'1' && c <= L'9') {
-                int selected = c - L'1';
+            if (c >= '1' && c <= '9') {
+                int selected = c - '1';
                 if (selected < display_count) {
                     ChangeCurrentDirectory(history[distances[selected].index].path);
                     break;
                 }
             }
-            else if (c == L'0' && display_count == 10) {
+            else if (c == '0' && display_count == 10) {
                 ChangeCurrentDirectory(history[distances[9].index].path);
                 break;
             }
@@ -1141,98 +1174,89 @@ void HandleOldHistory() {
 }
 
 void DrawOldHistoryPopup(int width, int height, DistanceEntry* distances, int display_count, CHAR_INFO* out_buffer) {
-    DrawBox(out_buffer, width, height);
+    // Fill background
+    for (int i = 0; i < width * height; i++) {
+        out_buffer[i].Char.UnicodeChar = L' ';
+        out_buffer[i].Attributes = white;
+    }
+
+    // Draw border - corners
+    out_buffer[0].Char.UnicodeChar = BOX_TOP_LEFT;
+    out_buffer[width - 1].Char.UnicodeChar = BOX_TOP_RIGHT;
+    int bottom = (height - 1) * width;
+    out_buffer[bottom].Char.UnicodeChar = BOX_BOTTOM_LEFT;
+    out_buffer[bottom + width - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
+
+    // Top and bottom edges
+    for (int col = 1; col < width - 1; col++) {
+        out_buffer[col].Char.UnicodeChar = BOX_HORIZONTAL;
+        out_buffer[bottom + col].Char.UnicodeChar = BOX_HORIZONTAL;
+    }
+
+    // Left and right edges
+    for (int row = 1; row < height - 1; row++) {
+        out_buffer[row * width].Char.UnicodeChar = BOX_VERTICAL;
+        out_buffer[row * width + width - 1].Char.UnicodeChar = BOX_VERTICAL;
+    }
 
     // Title
-    const WCHAR* title = L"Jump to Directory";
-    int title_col = (width - (int)wcslen(title)) / 2;
-    WriteToBuffer(out_buffer, width, 1, title_col, title, COLOR_BLUE);
+    char* title = "Visited Directories";
+    int title_col = (width - (int)strlen(title)) / 2;
+    WriteToBuffer(out_buffer, width, 1, title_col, title, blue);
 
     // List entries
     for (int i = 0; i < display_count; i++) {
-        WCHAR line[MAX_PATH + 8];
+        char line[MAX_PATH];
         int num = (i == 9) ? 0 : i + 1;
-        StringCchPrintfW(line, ARRAYSIZE(line), L"[%d] %ls", num, history[distances[i].index].path);
-        WriteToBuffer(out_buffer, width, 3 + i, 2, line, COLOR_WHITE);
+        snprintf(line, sizeof(line), "[%d] %s", num, history[distances[i].index].path);
+        WriteToBuffer(out_buffer, width, 3 + i, 2, line, white);
     }
 
     // Instructions
-    WriteToBuffer(out_buffer, width, height - 2, 2, L"Press 1-9/0 to jump, ESC to cancel", COLOR_WHITE);
+    WriteToBuffer(out_buffer, width, height - 2, 2, "Press 1-9/0 to jump, ESC to cancel", white);
 }
 
 void Cleanup() {
+    const char* temp = getenv("TEMP");
+    if (temp != NULL) {
+        char temp_path[MAX_PATH];
+        snprintf(temp_path, MAX_PATH, "%s\\browser_lastdir.txt", temp);
+
+        FILE* f = fopen(temp_path, "w");
+        if (f) {
+            fprintf(f, "%s", current_directory);
+            fclose(f);
+        }
+    }
+
+    SetConsoleMode(hIn, original_console_mode);
     SetConsoleActiveScreenBuffer(hOriginal);
-    SetConsoleMode(hIn, original_input_mode);
-    if (hAlt != hOriginal) {
-        CloseHandle(hAlt);
-    }
-
-    // Write the last directory for shell integration (same file name as before;
-    // content is now UTF-8, which is byte-identical to ANSI for ASCII paths)
-    WCHAR temp_dir[MAX_PATH];
-    DWORD n = GetEnvironmentVariableW(L"TEMP", temp_dir, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-
-    WCHAR file_path[MAX_PATH];
-    JoinPath(file_path, temp_dir, L"browser_lastdir.txt");
-
-    HANDLE h = CreateFileW(file_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (h == INVALID_HANDLE_VALUE) return;
-
-    char utf8[MAX_PATH * 4];
-    int bytes = WideCharToMultiByte(CP_UTF8, 0, current_directory, -1, utf8, sizeof(utf8), NULL, NULL);
-    if (bytes > 1) {
-        DWORD written;
-        WriteFile(h, utf8, bytes - 1, &written, NULL); // bytes includes the null terminator
-    }
-    CloseHandle(h);
+    CloseHandle(hAlt);
 }
 
-void WriteToBuffer(CHAR_INFO* buffer, int width, int row, int col, const WCHAR* text, WORD color) {
-    int len = (int)wcslen(text);
+void AnsiToWide(const char* src, wchar_t* dst, int dst_count) {
+    int written = MultiByteToWideChar(CP_ACP, 0, src, -1, dst, dst_count);
+    if (written == 0 && dst_count > 0) {
+        dst[0] = L'\0';
+    }
+}
+
+void WriteToBuffer(CHAR_INFO* buffer, int width, int row, int col, const char* text, WORD text_color) {
+    wchar_t wtext[MAX_PATH];
+    AnsiToWide(text, wtext, MAX_PATH);
+    int len = (int)wcslen(wtext);
+
     for (int i = 0; i < len && col + i < width - 1; i++) {
         int index = row * width + col + i;
-        buffer[index].Char.UnicodeChar = text[i];
-        buffer[index].Attributes = color;
+        buffer[index].Char.UnicodeChar = wtext[i];
+        buffer[index].Attributes = text_color;
     }
 }
 
 void ClearMarkedFiles() {
-    mark_directory[0] = L'\0';
+    mark_directory[0] = '\0';
     marked_files_count = 0;
     SetMarkStatus(MARKED);
-}
-
-// After the current directory listing changes (create, delete, paste, edits
-// made in vim), re-find each mark's row by file name and drop marks whose
-// files no longer exist. Keeps highlights and D/P targets correct.
-void SyncMarkedRows() {
-    if (!IsMarkDirectorySet() || !MarkDirEqualToCurrentDir()) return;
-
-    int write = 0;
-    for (int i = 0; i < marked_files_count; i++) {
-        WCHAR* base = wcsrchr(marked_files[i].path, L'\\');
-        base = base ? base + 1 : marked_files[i].path;
-
-        int found = -1;
-        for (int j = 0; j < current_directory_file_count; j++) {
-            if (wcscmp(current_directory_files[j].cFileName, base) == 0) {
-                found = j;
-                break;
-            }
-        }
-
-        if (found >= 0) {
-            marked_files[write] = marked_files[i];
-            marked_files[write].row = found;
-            write++;
-        }
-    }
-    marked_files_count = write;
-
-    if (marked_files_count == 0) {
-        ClearMarkedFiles();
-    }
 }
 
 int GetVisibleRows() {
@@ -1241,12 +1265,12 @@ int GetVisibleRows() {
     return info.srWindow.Bottom - info.srWindow.Top + 1;
 }
 
-bool IsDirectory(WIN32_FIND_DATAW* file_data) {
+bool IsDirectory(WIN32_FIND_DATA* file_data) {
     return (file_data->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-void GetSelectedRowPath(int row, WCHAR* out_path) {
-    JoinPath(out_path, current_directory, current_directory_files[row].cFileName);
+void GetSelectedRowPath(int selected_row, char* out_path) {
+    snprintf(out_path, MAX_PATH, "%s\\%s", current_directory, current_directory_files[selected_row].cFileName);
 }
 
 void LoadParentDirectory() {
@@ -1254,52 +1278,39 @@ void LoadParentDirectory() {
     parent_directory_file_count = GetFilesInDirectory(parent_directory, parent_directory_files);
 }
 
-void GetFilePath(WCHAR* directory, WIN32_FIND_DATAW* file, WCHAR* out_path) {
-    JoinPath(out_path, directory, file->cFileName);
+void GetFilePath(char* current_directory, WIN32_FIND_DATA* file, char* out_path) {
+    snprintf(out_path, MAX_PATH, "%s\\%s", current_directory, file->cFileName);
 }
 
-void JoinPath(WCHAR* out_path, const WCHAR* directory, const WCHAR* name) {
-    size_t len = 0;
-    while (len < MAX_PATH - 1 && directory[len] != L'\0') {
-        out_path[len] = directory[len];
-        len++;
-    }
-    // Avoid a double backslash when the directory is a root like "C:\"
-    if (len > 0 && len < MAX_PATH - 1 && out_path[len - 1] != L'\\') {
-        out_path[len++] = L'\\';
-    }
-    for (size_t i = 0; len < MAX_PATH - 1 && name[i] != L'\0'; i++) {
-        out_path[len++] = name[i];
-    }
-    out_path[len] = L'\0';
-}
-
-bool IsRootDirectory(WCHAR* path) {
-    return wcslen(path) == 3 && path[1] == L':' && path[2] == L'\\';
+bool IsRootDirectory(char* path) {
+    return strlen(path) == 3 && path[1] == ':' && path[2] == '\\';
 }
 
 bool IsMarkDirectorySet() {
-    return mark_directory[0] != L'\0';
+    return mark_directory[0] != '\0';
 }
 
 bool MarkDirEqualToCurrentDir() {
-    return wcscmp(mark_directory, current_directory) == 0;
+    return strcmp(mark_directory, current_directory) == 0;
 }
 
+// Full reset -- used when *changing* directories
 void LoadCurrentDirectory() {
     current_directory_file_count = GetFilesInDirectory(current_directory, current_directory_files);
+    selected_row = 0;
+    top_row = 0;
+}
 
-    // Clamp the cursor instead of resetting to the top, so reloads after
-    // delete/paste/create/vim keep you roughly where you were
+// Refresh in place -- used after paste/delete/create/vim so the cursor
+// doesn't jump back to the top. DrawScreen normalizes top_row.
+void ReloadCurrentDirectory() {
+    current_directory_file_count = GetFilesInDirectory(current_directory, current_directory_files);
     if (selected_row >= current_directory_file_count) {
-        selected_row = current_directory_file_count > 0 ? current_directory_file_count - 1 : 0;
+        selected_row = current_directory_file_count - 1;
     }
-    int visible = GetVisibleRows();
-    if (top_row > selected_row) top_row = selected_row;
-    if (selected_row - top_row >= visible) top_row = selected_row - visible + 1;
-    if (top_row < 0) top_row = 0;
-
-    SyncMarkedRows();
+    if (selected_row < 0) {
+        selected_row = 0;
+    }
 }
 
 void SetMarkStatus(enum MarkStatus status) {
