@@ -69,7 +69,9 @@ Use the included `drift.bat` wrapper to change your shell's directory when you q
 ```batch
 @echo off
 drift.exe
-for /f "delims=" %%i in (%TEMP%\browser_lastdir.txt) do cd /d "%%i"
+if exist "%TEMP%\browser_lastdir.txt" (
+    for /f "usebackq delims=" %%i in ("%TEMP%\browser_lastdir.txt") do cd /d "%%i"
+)
 ```
 
 ## Requirements

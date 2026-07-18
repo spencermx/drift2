@@ -24,7 +24,9 @@
 // - A        : Create new file/directory (append '\' to name for directory)
 //
 // Known limitations: filenames outside the system ANSI codepage are not
-// supported (requires FindFirstFileW conversion); UNC paths not supported.
+// supported -- they list with '?' placeholders and file operations on them
+// are refused, since the mangled name would act as a wildcard (full support
+// requires FindFirstFileW conversion); UNC paths not supported.
 //
 // Compilation - x86_64-w64-mingw32-gcc drift.c -o drift.exe
 //             - cl drift.c
@@ -87,8 +89,9 @@ int GetFilesInDirectory(char* path, WIN32_FIND_DATA files[]);
 int CompareFiles(const void* a, const void* b);
 void GetParentDirectory(char* path, char* parent);
 bool IsDirectory(WIN32_FIND_DATA* file_data);
-void GetSelectedRowPath(int selected_row, char* out_path);
-void GetFilePath(char* current_directory, WIN32_FIND_DATA* file_data, char* out_path);
+bool GetSelectedRowPath(int selected_row, char* out_path);
+bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file_data, char* out_path);
+int CalculateDistance(char* current, char* target);
 int GetVisibleRows();
 bool IsRootDirectory(char* path);
 void SaveDirectoryState();
@@ -113,6 +116,7 @@ void LoadCurrentDirectory();
 void ReloadCurrentDirectory();
 void ClearMarkedFiles();
 void DrawCreatePopup(int width, char* input_text, CHAR_INFO* out_buffer);
+void ShowStatusBanner(const char* text);
 void HandleCreate();
 void HandleMarkOperation(enum MarkStatus new_status);
 void HandleOldHistory();
@@ -175,11 +179,17 @@ void Initialize() {
     // ChangeCurrentDirectory strcpy's into current_directory, and
     // overlapping source/destination is undefined behavior)
     char start_dir[MAX_PATH];
-    GetCurrentDirectory(MAX_PATH, start_dir);
+    DWORD start_dir_len = GetCurrentDirectory(MAX_PATH, start_dir);
+    if (start_dir_len == 0 || start_dir_len >= MAX_PATH) {
+        strcpy(start_dir, "C:\\"); // failure leaves start_dir indeterminate
+    }
     ChangeCurrentDirectory(start_dir);
 
     GetConsoleMode(hIn, &original_console_mode);
-    SetConsoleMode(hIn, original_console_mode & ~ENABLE_PROCESSED_INPUT);
+    // ENABLE_WINDOW_INPUT is disabled by default, and without it the console
+    // never delivers resize events -- the screen would stay stale until the
+    // next keypress
+    SetConsoleMode(hIn, (original_console_mode & ~ENABLE_PROCESSED_INPUT) | ENABLE_WINDOW_INPUT);
 }
 
 void DrawScreen() {
@@ -293,22 +303,24 @@ void DrawScreen() {
         // reloads and re-sorting
         if (marked_files_count > 0 && MarkDirEqualToCurrentDir()) {
             char row_path[MAX_PATH];
-            GetFilePath(current_directory, &current_directory_files[file_index], row_path);
+            // A row whose path can't be built (mangled or over-long name)
+            // can never be in marked_files, and row_path would be unset
+            if (GetFilePath(current_directory, &current_directory_files[file_index], row_path)) {
+                for (int j = 0; j < marked_files_count; j++) {
+                    if (strcmp(marked_files[j].path, row_path) == 0) {
+                        int mark_index = i * width + COLUMN_DIVIDER_POSITION + 1;
 
-            for (int j = 0; j < marked_files_count; j++) {
-                if (strcmp(marked_files[j].path, row_path) == 0) {
-                    int mark_index = i * width + COLUMN_DIVIDER_POSITION + 1;
+                        if (mark_status == MARKED) {
+                            buffer[mark_index].Char.UnicodeChar = L'*';
+                        } else if (mark_status == YANKED) {
+                            buffer[mark_index].Char.UnicodeChar = L'Y';
+                        } else if (mark_status == CUT) {
+                            buffer[mark_index].Char.UnicodeChar = L'X';
+                        }
 
-                    if (mark_status == MARKED) {
-                        buffer[mark_index].Char.UnicodeChar = L'*';
-                    } else if (mark_status == YANKED) {
-                        buffer[mark_index].Char.UnicodeChar = L'Y';
-                    } else if (mark_status == CUT) {
-                        buffer[mark_index].Char.UnicodeChar = L'X';
+                        buffer[mark_index].Attributes = white;
+                        break;
                     }
-
-                    buffer[mark_index].Attributes = white;
-                    break;
                 }
             }
         }
@@ -345,7 +357,9 @@ void DrawScreen() {
 int HandleInput() {
     INPUT_RECORD input;
     DWORD events;
-    ReadConsoleInput(hIn, &input, 1, &events);
+    if (!ReadConsoleInput(hIn, &input, 1, &events)) {
+        return 0; // Console input unavailable (e.g. redirected stdin) -- exit
+    }
 
     if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) {
         return 1; // Ignore non-key events (window resize lands here and triggers a redraw)
@@ -383,11 +397,15 @@ int HandleInput() {
                 strcpy(mark_directory, current_directory);
 
                 // GetFilesInDirectory caps the listing at MAX_FILES, so this
-                // cannot overflow marked_files
+                // cannot overflow marked_files. Files whose full path would
+                // truncate are skipped rather than marked wrong.
+                int n = 0;
                 for (int i = 0; i < current_directory_file_count; i++) {
-                    GetFilePath(current_directory, &current_directory_files[i], marked_files[i].path);
+                    if (GetFilePath(current_directory, &current_directory_files[i], marked_files[n].path)) {
+                        n++;
+                    }
                 }
-                marked_files_count = current_directory_file_count;
+                marked_files_count = n;
                 break;
             }
             case VK_OEM_4: {
@@ -416,8 +434,9 @@ int HandleInput() {
 
                 if (IsDirectory(&current_directory_files[selected_row])) {
                     char selected_directory_path[MAX_PATH];
-                    GetSelectedRowPath(selected_row, selected_directory_path);
-                    ChangeCurrentDirectory(selected_directory_path);
+                    if (GetSelectedRowPath(selected_row, selected_directory_path)) {
+                        ChangeCurrentDirectory(selected_directory_path);
+                    }
                 }
                 break;
             }
@@ -503,7 +522,9 @@ int HandleInput() {
 
 void OpenFileInEditor() {
     char file_path[MAX_PATH];
-    GetSelectedRowPath(selected_row, file_path);
+    if (!GetSelectedRowPath(selected_row, file_path)) {
+        return; // mangled or over-long name -- could act on the wrong file
+    }
 
     char command[MAX_PATH + 16];
     snprintf(command, sizeof(command), "vim \"%s\"", file_path);
@@ -528,7 +549,7 @@ void OpenFileInEditor() {
         ShellExecute(NULL, "open", file_path, NULL, NULL, SW_SHOWNORMAL);
     }
 
-    SetConsoleMode(hIn, original_console_mode & ~ENABLE_PROCESSED_INPUT);
+    SetConsoleMode(hIn, (original_console_mode & ~ENABLE_PROCESSED_INPUT) | ENABLE_WINDOW_INPUT);
     SetConsoleActiveScreenBuffer(hAlt);
 
     // The editor may have written new files
@@ -591,26 +612,44 @@ void HandlePaste(int move) {
     strcpy(to, current_directory);
     to[strlen(to) + 1] = '\0';
 
+    char banner[64];
+    snprintf(banner, sizeof(banner), "%s %d item(s)...", move ? "Moving" : "Copying", marked_files_count);
+    ShowStatusBanner(banner);
+
     SHFILEOPSTRUCT op = {0};
     op.wFunc = move ? FO_MOVE : FO_COPY;
     op.pFrom = from;
     op.pTo = to;
     // FOF_RENAMEONCOLLISION: name collisions produce "Copy of ..." instead of
-    // silently overwriting the existing file
-    op.fFlags = FOF_NOCONFIRMATION | FOF_SILENT | FOF_RENAMEONCOLLISION;
+    // silently overwriting the existing file. FOF_SILENT is deliberately not
+    // set: long operations get the shell's progress dialog (with cancel)
+    // instead of looking like a hang
+    op.fFlags = FOF_NOCONFIRMATION | FOF_RENAMEONCOLLISION;
 
-    SHFileOperation(&op);
+    int result = SHFileOperation(&op);
     free(from);
 
-    ReloadCurrentDirectory();
-    ClearMarkedFiles();
+    // Keys mashed while the operation blocked the input loop would replay
+    // as commands afterwards -- discard them
+    FlushConsoleInputBuffer(hIn);
+
+    ReloadCurrentDirectory(); // partial work may have happened either way
+
+    // Failure keeps the marks, same as cancelling the delete popup -- the
+    // user built that set on purpose. (Windows shows its own error dialog;
+    // FOF_NOERRORUI is unset.)
+    if (result == 0 && !op.fAnyOperationsAborted) {
+        ClearMarkedFiles();
+    }
 }
 
 void ToggleMark() {
     if (current_directory_file_count == 0) return;
 
     char full_path[MAX_PATH];
-    GetFilePath(current_directory, &current_directory_files[selected_row], full_path);
+    if (!GetFilePath(current_directory, &current_directory_files[selected_row], full_path)) {
+        return; // path too deep to operate on safely
+    }
 
     // Match by path so marks stay consistent across reloads
     for (int i = 0; i < marked_files_count; i++) {
@@ -684,7 +723,9 @@ int CompareFiles(const void* a, const void* b) {
 
 int GetFilesInDirectory(char* path, WIN32_FIND_DATA files[]) {
     char search_path[MAX_PATH];
-    snprintf(search_path, MAX_PATH, "%s\\*", path);
+    if (snprintf(search_path, MAX_PATH, "%s\\*", path) >= MAX_PATH) {
+        return 0; // would truncate -- don't list a different directory
+    }
 
     WIN32_FIND_DATA fd;
     HANDLE hFind = FindFirstFile(search_path, &fd);
@@ -763,6 +804,10 @@ void ModifySelectedRow(int num) {
 
 
 void SaveDirectoryState() {
+    // The startup call arrives before current_directory is ever set -- don't
+    // record a permanent empty entry in history
+    if (current_directory[0] == '\0') return;
+
     // check if the current directory is already in history
     for (int i = 0; i < history_count; i++) {
         if (strcmp(history[i].path, current_directory) == 0) {
@@ -832,22 +877,40 @@ void ConfirmDelete() {
     while (1) {
         INPUT_RECORD input;
         DWORD events;
-        ReadConsoleInput(hIn, &input, 1, &events);
+        if (!ReadConsoleInput(hIn, &input, 1, &events)) {
+            break; // Treat console failure as cancel
+        }
 
         if (input.EventType == KEY_EVENT && input.Event.KeyEvent.bKeyDown) {
             if (input.Event.KeyEvent.wVirtualKeyCode == 'Y') {
                 char* from = BuildFromList(NULL);
                 if (from != NULL) {
+                    char banner[64];
+                    snprintf(banner, sizeof(banner), "Deleting %d item(s)...", marked_files_count);
+                    ShowStatusBanner(banner);
+
                     SHFILEOPSTRUCT op = {0};
                     op.wFunc = FO_DELETE;
                     op.pFrom = from;
-                    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT;
+                    // FOF_WANTNUKEWARNING: on volumes with no recycle bin
+                    // (network shares, some removable drives) still warn
+                    // before permanently destroying files -- the popup
+                    // promises "Move to Recycle Bin". FOF_SILENT unset: long
+                    // recycles get the shell's progress dialog
+                    op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_WANTNUKEWARNING;
 
-                    SHFileOperation(&op);
+                    int result = SHFileOperation(&op);
                     free(from);
+
+                    // Discard keys mashed while the operation blocked input
+                    FlushConsoleInputBuffer(hIn);
+
+                    // Failure keeps the marks, same as cancelling
+                    if (result == 0 && !op.fAnyOperationsAborted) {
+                        ClearMarkedFiles();
+                    }
                 }
 
-                ClearMarkedFiles();
                 ReloadCurrentDirectory();
                 break;
             } else if (input.Event.KeyEvent.wVirtualKeyCode == 'N' ||
@@ -952,6 +1015,54 @@ void DrawCreatePopup(int width, char* input_text, CHAR_INFO* out_buffer) {
     WriteToBuffer(out_buffer, width, 1, 8, input_text, white);
 }
 
+// Paint a small centered banner right before a blocking shell operation so
+// the console shows what is happening (the shell's own progress dialog only
+// appears once the operation has run for a moment); the next DrawScreen
+// erases it
+void ShowStatusBanner(const char* text) {
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
+    int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
+    int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
+
+    int height = 3;
+    int width = (int)strlen(text) + 4;
+    if (width > screen_width) width = screen_width;
+    if (width < 6 || screen_height < height) return;
+
+    CHAR_INFO* banner = (CHAR_INFO*)malloc(width * height * sizeof(CHAR_INFO));
+    if (banner == NULL) return;
+
+    for (int i = 0; i < width * height; i++) {
+        banner[i].Char.UnicodeChar = L' ';
+        banner[i].Attributes = white;
+    }
+
+    // Border (same 3-row frame as the create popup)
+    banner[0].Char.UnicodeChar = BOX_TOP_LEFT;
+    banner[width - 1].Char.UnicodeChar = BOX_TOP_RIGHT;
+    int bottom = 2 * width;
+    banner[bottom].Char.UnicodeChar = BOX_BOTTOM_LEFT;
+    banner[bottom + width - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
+    for (int col = 1; col < width - 1; col++) {
+        banner[col].Char.UnicodeChar = BOX_HORIZONTAL;
+        banner[bottom + col].Char.UnicodeChar = BOX_HORIZONTAL;
+    }
+    banner[width].Char.UnicodeChar = BOX_VERTICAL;
+    banner[width * 2 - 1].Char.UnicodeChar = BOX_VERTICAL;
+
+    WriteToBuffer(banner, width, 1, 2, text, white);
+
+    int start_col = info.srWindow.Left + (screen_width - width) / 2;
+    int start_row = info.srWindow.Top + (screen_height - height) / 2;
+    COORD buffer_size = { (SHORT)width, (SHORT)height };
+    COORD origin = { 0, 0 };
+    SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
+                          (SHORT)(start_col + width - 1), (SHORT)(start_row + height - 1) };
+    WriteConsoleOutputW(hAlt, banner, buffer_size, origin, &region);
+    free(banner);
+}
+
 void HandleCreate() {
     char name[MAX_PATH];
     name[0] = '\0';
@@ -991,7 +1102,10 @@ void HandleCreate() {
         // Get input
         INPUT_RECORD input;
         DWORD events;
-        ReadConsoleInput(hIn, &input, 1, &events);
+        if (!ReadConsoleInput(hIn, &input, 1, &events)) {
+            name[0] = '\0'; // Treat console failure as cancel, not as
+            break;          // "create with the partial name"
+        }
 
         if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) {
             continue;
@@ -1029,7 +1143,9 @@ void HandleCreate() {
     }
 
     char full_path[MAX_PATH];
-    snprintf(full_path, MAX_PATH, "%s\\%s", current_directory, name);
+    if (snprintf(full_path, MAX_PATH, "%s\\%s", current_directory, name) >= MAX_PATH) {
+        return; // would truncate -- could create or collide at the wrong path
+    }
 
     if (is_directory) {
         CreateDirectory(full_path, NULL);
@@ -1052,41 +1168,41 @@ void HandleCreate() {
 }
 
 int CalculateDistance(char* current, char* target) {
-    // Check if target is below current (current is prefix of target)
-    int current_len = (int)strlen(current);
-    if (strncmp(current, target, current_len) == 0 &&
-        (target[current_len] == '\\' || target[current_len] == '\0')) {
-        // Count slashes after current path
-        int distance = 0;
-        for (int i = current_len; target[i] != '\0'; i++) {
-            if (target[i] == '\\') distance++;
-        }
-        return distance;
-    }
-
-    // Otherwise, find common ancestor
+    // Walk current upward until it is a prefix of target, counting steps.
+    // The first iteration (steps_up == 0) covers the "target is below
+    // current" case.
     char temp[MAX_PATH];
     strcpy(temp, current);
     int steps_up = 0;
 
     while (temp[0] != '\0') {
+        // Compare "C:\" as "C:" so the drive root can prefix-match
         int temp_len = (int)strlen(temp);
+        if (temp_len > 0 && temp[temp_len - 1] == '\\') {
+            temp_len--;
+        }
+
         if (strncmp(temp, target, temp_len) == 0 &&
             (target[temp_len] == '\\' || target[temp_len] == '\0')) {
-            // Found common ancestor, count steps down
+            // Found common ancestor, count steps down. A lone trailing
+            // backslash (root "C:\") is a separator, not a step.
             int steps_down = 0;
             for (int i = temp_len; target[i] != '\0'; i++) {
-                if (target[i] == '\\') steps_down++;
+                if (target[i] == '\\' && target[i + 1] != '\0') steps_down++;
             }
             return steps_up + steps_down;
         }
 
-        // Cut off last directory
+        // Cut off last directory; the drive root itself is still a valid
+        // ancestor, so reduce to "C:\" and try once more before giving up
         char* last_slash = strrchr(temp, '\\');
-        if (last_slash == NULL || last_slash == temp + 2) {
-            break; // Hit root or different drive
+        if (last_slash == NULL) break;
+        if (last_slash == temp + 2 && temp[1] == ':') {
+            if (temp[3] == '\0') break; // already at the drive root
+            temp[3] = '\0';
+        } else {
+            *last_slash = '\0';
         }
-        *last_slash = '\0';
         steps_up++;
     }
 
@@ -1147,7 +1263,9 @@ void HandleOldHistory() {
     while (1) {
         INPUT_RECORD input;
         DWORD events;
-        ReadConsoleInput(hIn, &input, 1, &events);
+        if (!ReadConsoleInput(hIn, &input, 1, &events)) {
+            break; // Treat console failure as cancel
+        }
 
         if (input.EventType == KEY_EVENT && input.Event.KeyEvent.bKeyDown) {
             char c = input.Event.KeyEvent.uChar.AsciiChar;
@@ -1269,8 +1387,10 @@ bool IsDirectory(WIN32_FIND_DATA* file_data) {
     return (file_data->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-void GetSelectedRowPath(int selected_row, char* out_path) {
-    snprintf(out_path, MAX_PATH, "%s\\%s", current_directory, current_directory_files[selected_row].cFileName);
+// Same contract as GetFilePath -- false on a mangled or over-long name, so
+// navigation and open never act on a truncated (wrong) path
+bool GetSelectedRowPath(int selected_row, char* out_path) {
+    return GetFilePath(current_directory, &current_directory_files[selected_row], out_path);
 }
 
 void LoadParentDirectory() {
@@ -1278,8 +1398,19 @@ void LoadParentDirectory() {
     parent_directory_file_count = GetFilesInDirectory(parent_directory, parent_directory_files);
 }
 
-void GetFilePath(char* current_directory, WIN32_FIND_DATA* file, char* out_path) {
-    snprintf(out_path, MAX_PATH, "%s\\%s", current_directory, file->cFileName);
+// Returns false when the combined path would truncate at MAX_PATH -- a
+// truncated path could name a *different* existing file, so callers that
+// feed SHFileOperation must skip such entries. Also refuses names containing
+// '?' or '*': those are illegal in real Windows filenames, so their presence
+// means FindFirstFileA mangled a name it could not represent in the ANSI
+// codepage -- and SHFileOperation expands them as wildcards, which would
+// operate on files that were never marked
+bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file, char* out_path) {
+    if (strpbrk(file->cFileName, "?*") != NULL) {
+        out_path[0] = '\0';
+        return false;
+    }
+    return snprintf(out_path, MAX_PATH, "%s\\%s", current_directory, file->cFileName) < MAX_PATH;
 }
 
 bool IsRootDirectory(char* path) {
