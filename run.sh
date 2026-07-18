@@ -23,4 +23,9 @@ if [ ! -f drift.exe ] || [ drift.c -nt drift.exe ]; then
     x86_64-w64-mingw32-gcc drift.c -o drift.exe
 fi
 
+# Point drift's home jump (~) at the real macOS home directory; without
+# this it would land in Wine's fake profile dir (~/.wine/drive_c/users/...)
+DRIFT_HOME="Z:$(printf '%s' "$HOME" | tr '/' '\\')"
+export DRIFT_HOME
+
 exec wine drift.exe

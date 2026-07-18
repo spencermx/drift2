@@ -25,6 +25,7 @@ A fast, vim-style terminal file browser for Windows.
 | `G` | Jump to bottom |
 | `Ctrl+d` | Page down |
 | `Ctrl+u` | Page up |
+| `` ` `` or `~` | Jump to home directory |
 | `o` | Show directory history |
 
 ### File Operations
@@ -42,6 +43,7 @@ A fast, vim-style terminal file browser for Windows.
 | Key | Action |
 |-----|--------|
 | `a` | Create new file (or directory if name ends with `\`) |
+| `.` | Toggle hidden files (hidden by default) |
 | `Enter` | Open file in vim |
 | `q` | Quit |
 

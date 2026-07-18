@@ -10,6 +10,7 @@
 // - gg       : Move to top of the list
 // - Ctrl + D : Half page down
 // - Ctrl + U : Half page up
+// - ` or ~   : Jump to the home directory (DRIFT_HOME, else %USERPROFILE%)
 // - Enter    : Open file in vim (falls back to default application)
 // Operations on marked files:
 // - Space    : Toggle mark on selected file/directory
@@ -22,6 +23,7 @@
 // Misc:
 // - O        : Show visited directories and jump to selected one
 // - A        : Create new file/directory (append '\' to name for directory)
+// - .        : Toggle showing hidden files (hidden by default)
 //
 // Known limitations: filenames outside the system ANSI codepage are not
 // supported -- they list with '?' placeholders and file operations on them
@@ -85,6 +87,7 @@ void DrawScreen();
 int HandleInput();
 void ModifySelectedRow(int num);
 void ChangeCurrentDirectory(char* path);
+void JumpToHome();
 int GetFilesInDirectory(char* path, WIN32_FIND_DATA files[]);
 int CompareFiles(const void* a, const void* b);
 void GetParentDirectory(char* path, char* parent);
@@ -152,6 +155,7 @@ int selected_row = 0;
 int top_row = 0;
 
 bool pending_g = false;
+bool show_hidden = false;
 
 enum MarkStatus mark_status = MARKED;
 // =========================== Global Variables ==============================
@@ -198,10 +202,13 @@ void DrawScreen() {
     int width = info.srWindow.Right - info.srWindow.Left + 1;
     int height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
-    // Window too small to draw the layout safely
-    if (width < MIN_WINDOW_WIDTH || height < 1) {
+    // Window too small to draw the layout safely (one header line plus at
+    // least one listing row)
+    if (width < MIN_WINDOW_WIDTH || height < 2) {
         return;
     }
+
+    int list_height = height - 1; // row 0 is the header line
 
     // Re-clamp scroll state against the *current* window size. The window may
     // have been resized since the last keypress, which would otherwise let the
@@ -213,8 +220,8 @@ void DrawScreen() {
         if (selected_row >= current_directory_file_count) {
             selected_row = current_directory_file_count - 1;
         }
-        if (top_row > current_directory_file_count - height) {
-            top_row = current_directory_file_count - height;
+        if (top_row > current_directory_file_count - list_height) {
+            top_row = current_directory_file_count - list_height;
         }
         if (top_row < 0) {
             top_row = 0;
@@ -222,8 +229,8 @@ void DrawScreen() {
         if (top_row > selected_row) {
             top_row = selected_row;
         }
-        if (selected_row - top_row >= height) {
-            top_row = selected_row - height + 1;
+        if (selected_row - top_row >= list_height) {
+            top_row = selected_row - list_height + 1;
         }
     }
 
@@ -249,8 +256,43 @@ void DrawScreen() {
 
     wchar_t wname[MAX_PATH];
 
+    // ============================= Draw Header Line ==================================
+    {
+        char right_info[48];
+        char mark_char = mark_status == YANKED ? 'Y' : (mark_status == CUT ? 'X' : '*');
+        int position = current_directory_file_count == 0 ? 0 : selected_row + 1;
+        if (marked_files_count > 0) {
+            snprintf(right_info, sizeof(right_info), "%c%d  %d/%d",
+                     mark_char, marked_files_count, position, current_directory_file_count);
+        } else {
+            snprintf(right_info, sizeof(right_info), "%d/%d",
+                     position, current_directory_file_count);
+        }
+
+        int right_col = width - (int)strlen(right_info) - 1;
+        if (right_col > 0) {
+            WriteToBuffer(buffer, width, 0, right_col, right_info, white);
+        }
+
+        // Path on the left, truncated from the front so the deepest (most
+        // useful) part stays visible
+        int path_avail = right_col - 2;
+        int path_len = (int)strlen(current_directory);
+        char path_display[MAX_PATH + 4];
+        if (path_len <= path_avail) {
+            strcpy(path_display, current_directory);
+        } else if (path_avail > 3) {
+            snprintf(path_display, sizeof(path_display), "...%s",
+                     current_directory + (path_len - (path_avail - 3)));
+        } else {
+            path_display[0] = '\0';
+        }
+        WriteToBuffer(buffer, width, 0, 0, path_display, blue);
+    }
+    // ============================= Draw Header Line ==================================
+
     // ============================= Draw Parent Directory =============================
-    for (int i = 0; i < height && i < parent_directory_file_count; i++) {
+    for (int i = 0; i < list_height && i < parent_directory_file_count; i++) {
         int file_index = i;
 
         if (IsDirectory(&parent_directory_files[file_index])) {
@@ -263,7 +305,7 @@ void DrawScreen() {
         int len = (int)wcslen(wname);
 
         for (int col = 0; col < len && col < COLUMN_DIVIDER_POSITION - 2; col++) {
-            int index = i * width + col;
+            int index = (i + 1) * width + col;
             buffer[index].Char.UnicodeChar = wname[col];
             buffer[index].Attributes = color;
         }
@@ -272,7 +314,7 @@ void DrawScreen() {
 
     // ============================= Draw Column Divider ===============================
     color = blue;
-    for (int i = 0; i < height; i++) {
+    for (int i = 1; i < height; i++) {
         int index = i * width + COLUMN_DIVIDER_POSITION;
         buffer[index].Char.UnicodeChar = BOX_VERTICAL;
         buffer[index].Attributes = color;
@@ -280,7 +322,7 @@ void DrawScreen() {
     // ============================= Draw Column Divider ===============================
 
     // ============================= Draw Current Directory ============================
-    for (int i = 0; i < height && top_row + i < current_directory_file_count; i++) {
+    for (int i = 0; i < list_height && top_row + i < current_directory_file_count; i++) {
         int file_index = top_row + i;
 
         if (IsDirectory(&current_directory_files[file_index])) {
@@ -293,7 +335,7 @@ void DrawScreen() {
         int len = (int)wcslen(wname);
 
         for (int col = 0; col < len && col + COLUMN_DIVIDER_POSITION + 4 < width; col++) {
-            int index = i * width + COLUMN_DIVIDER_POSITION + 4 + col;
+            int index = (i + 1) * width + COLUMN_DIVIDER_POSITION + 4 + col;
             buffer[index].Char.UnicodeChar = wname[col];
             buffer[index].Attributes = color;
         }
@@ -308,7 +350,7 @@ void DrawScreen() {
             if (GetFilePath(current_directory, &current_directory_files[file_index], row_path)) {
                 for (int j = 0; j < marked_files_count; j++) {
                     if (strcmp(marked_files[j].path, row_path) == 0) {
-                        int mark_index = i * width + COLUMN_DIVIDER_POSITION + 1;
+                        int mark_index = (i + 1) * width + COLUMN_DIVIDER_POSITION + 1;
 
                         if (mark_status == MARKED) {
                             buffer[mark_index].Char.UnicodeChar = L'*';
@@ -330,7 +372,7 @@ void DrawScreen() {
 
     // Draw the cursor (skip in empty directories -- there is nothing to point at)
     if (current_directory_file_count > 0) {
-        int index = (selected_row - top_row) * width + COLUMN_DIVIDER_POSITION + 2;
+        int index = (selected_row - top_row + 1) * width + COLUMN_DIVIDER_POSITION + 2;
         buffer[index].Char.UnicodeChar = L'>';
         buffer[index].Attributes = white;
     }
@@ -349,7 +391,7 @@ void DrawScreen() {
 
     COORD cursor_position = {
         (SHORT)(info.srWindow.Left + COLUMN_DIVIDER_POSITION + 4),
-        (SHORT)(info.srWindow.Top + selected_row - top_row)
+        (SHORT)(info.srWindow.Top + 1 + selected_row - top_row)
     };
     SetConsoleCursorPosition(hAlt, cursor_position);
 }
@@ -373,6 +415,9 @@ int HandleInput() {
         if (input.Event.KeyEvent.wVirtualKeyCode == 'G') {
             // Jump to bottom: any magnitude >= file count clamps to the last row
             ModifySelectedRow(current_directory_file_count);
+        }
+        else if (input.Event.KeyEvent.wVirtualKeyCode == VK_OEM_3) {
+            JumpToHome(); // '~' -- same key as backtick, kept for muscle memory
         }
     }
     else if (ctrl) {
@@ -510,6 +555,20 @@ int HandleInput() {
             }
             case VK_ESCAPE: {
                 ClearMarkedFiles();
+                break;
+            }
+            case VK_OEM_3: {
+                JumpToHome(); // '`'
+                break;
+            }
+            case VK_OEM_PERIOD: {
+                // Toggle visibility of hidden files; both panes reload so
+                // they stay consistent
+                show_hidden = !show_hidden;
+                ReloadCurrentDirectory();
+                if (parent_directory[0] != '\0') {
+                    LoadParentDirectory();
+                }
                 break;
             }
             case 'Q': {
@@ -691,6 +750,19 @@ void ChangeCurrentDirectory(char* path) {
     RestoreDirectoryState();
 }
 
+// DRIFT_HOME overrides USERPROFILE so wrappers can redirect the home jump
+// (under Wine, USERPROFILE is the prefix's fake profile dir, not the real one)
+void JumpToHome() {
+    char home[MAX_PATH];
+    DWORD len = GetEnvironmentVariable("DRIFT_HOME", home, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        len = GetEnvironmentVariable("USERPROFILE", home, MAX_PATH);
+    }
+    if (len > 0 && len < MAX_PATH) {
+        ChangeCurrentDirectory(home);
+    }
+}
+
 void GetParentDirectory(char* path, char* parent) {
     strcpy(parent, path);
 
@@ -736,6 +808,7 @@ int GetFilesInDirectory(char* path, WIN32_FIND_DATA files[]) {
         do {
             if (strcmp(fd.cFileName, ".") == 0) continue;
             if (strcmp(fd.cFileName, "..") == 0) continue;
+            if (!show_hidden && (fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN)) continue;
 
             files[count] = fd;
             count++;
@@ -1377,10 +1450,12 @@ void ClearMarkedFiles() {
     SetMarkStatus(MARKED);
 }
 
+// Listing rows only -- the top row of the window is the header line
 int GetVisibleRows() {
     CONSOLE_SCREEN_BUFFER_INFO info;
-    GetConsoleScreenBufferInfo(hAlt, &info);
-    return info.srWindow.Bottom - info.srWindow.Top + 1;
+    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return 1;
+    int rows = info.srWindow.Bottom - info.srWindow.Top;
+    return rows < 1 ? 1 : rows;
 }
 
 bool IsDirectory(WIN32_FIND_DATA* file_data) {
