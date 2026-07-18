@@ -48,6 +48,8 @@ A fast, vim-style terminal file browser for Windows.
 ## Build
 
 ### Windows (MSVC)
+Run `build.bat` — it locates Visual Studio automatically (and tells you what
+to install if the C++ tools are missing). Or, from a Developer Command Prompt:
 ```batch
 cl drift.c /Fe:drift.exe shell32.lib
 ```
