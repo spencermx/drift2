@@ -20,10 +20,10 @@ for /F "tokens=*" %%b in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set "GIT_
 :: Check for uncommitted changes
 git diff --quiet --exit-code >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    set "DIRTY=%YELLOW%*%RESET%"
+    set "BRANCH_COLOR=%YELLOW%"
 ) else (
-    set "DIRTY="
+    set "BRANCH_COLOR="
 )
 
 :: Set prompt with branch info
-set "PROMPT=%CYAN%$P %MAGENTA%(%GIT_BRANCH%%DIRTY%%MAGENTA%)%RESET% %DIM%$G%RESET% "
+set "PROMPT=$P %BRANCH_COLOR%(%GIT_BRANCH%)%RESET% %DIM%$G%RESET% "
