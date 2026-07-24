@@ -68,8 +68,12 @@
 #define CREATE_POPUP_WIDTH 50
 #define COLUMN_DIVIDER_POSITION 28
 #define MIN_WINDOW_WIDTH (COLUMN_DIVIDER_POSITION + 8)
-// Third (context/preview) pane appears when the window is at least this wide
+// Third (context/preview) pane appears when the window is at least this wide.
+// The current pane takes two thirds of the remaining width on narrow windows
+// but never grows past the cap -- past that, all extra width goes to the
+// preview pane, where long text lines can actually use it
 #define THREE_PANE_MIN_WIDTH 80
+#define SECOND_DIVIDER_MAX (COLUMN_DIVIDER_POSITION + 58)
 #define PREVIEW_BYTES 4096
 
 enum MarkStatus {
@@ -249,7 +253,13 @@ void DrawScreen() {
     // Three panes (parent | current | context) when there is room; otherwise
     // divider2 sits at the right edge and the layout degrades to two panes
     bool three_pane = width >= THREE_PANE_MIN_WIDTH;
-    int divider2 = three_pane ? width - width / 3 : width;
+    int divider2 = width;
+    if (three_pane) {
+        divider2 = width - width / 3;
+        if (divider2 > SECOND_DIVIDER_MAX) {
+            divider2 = SECOND_DIVIDER_MAX;
+        }
+    }
 
     // Re-clamp scroll state against the *current* window size. The window may
     // have been resized since the last keypress, which would otherwise let the
