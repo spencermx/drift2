@@ -45,6 +45,7 @@ A fast, vim-style terminal file browser for Windows.
 |-----|--------|
 | `a` | Create new file (or directory if name ends with `\`) |
 | `.` | Toggle hidden files (hidden by default) |
+| `c` | Claude workspace browser (`l` opens a workspace's sessions, `h` backs out) |
 | `Enter` | Open file in vim |
 | `q` | Quit |
 

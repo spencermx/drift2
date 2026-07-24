@@ -24,6 +24,12 @@
 // - O        : Show visited directories and jump to selected one
 // - A        : Create new file/directory (append '\' to name for directory)
 // - .        : Toggle showing hidden files (hidden by default)
+// Claude workspaces:
+// - C        : Toggle the claude workspace browser. Workspaces are anchor
+//              directories under %USERPROFILE%\.drift\workspaces; l/Enter
+//              opens a workspace's session list, h/Esc backs out. Sessions
+//              are read from %USERPROFILE%\.claude\projects (override the
+//              .claude location with DRIFT_CLAUDE_DIR).
 //
 // Layout: three panes when the window is at least 80 columns wide --
 // parent | current | context. The context pane previews the selected item:
@@ -81,6 +87,19 @@ enum MarkStatus {
     YANKED,
     CUT
 };
+enum ClaudeMode {
+    CM_OFF,        // normal file browsing
+    CM_WORKSPACES, // browsing the workspaces root (a real directory)
+    CM_SESSIONS    // viewing one workspace's session list
+};
+#define MAX_SESSIONS 256
+#define SESSION_TITLE_LEN 96
+typedef struct {
+    char path[MAX_PATH];          // full path to the .jsonl transcript
+    char id[48];                  // session uuid (filename without .jsonl)
+    char title[SESSION_TITLE_LEN]; // first user message excerpt
+    FILETIME mtime;
+} SessionEntry;
 typedef struct {
     char path[MAX_PATH];
     int selected_row;
@@ -109,6 +128,15 @@ WORD FileColor(WIN32_FIND_DATA* file);
 void DrawContextPane(CHAR_INFO* buffer, int width, int height, int divider2);
 void LoadPreview();
 void FormatSize(ULONGLONG size, char* out, int out_size);
+void EnterClaudeMode();
+void ExitClaudeMode();
+void EnterSessionsView();
+void LoadSessions();
+void ParseSessionTitle(const char* path, char* out, int out_size);
+int CompareSessions(const void* a, const void* b);
+void FormatAge(FILETIME ft, char* out, int out_size);
+void EncodeProjectPath(const char* path, char* out, bool keep_dots);
+void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, int list_height);
 bool GetSelectedRowPath(int selected_row, char* out_path);
 bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file_data, char* out_path);
 int CalculateDistance(char* current, char* target);
@@ -192,6 +220,16 @@ int top_row = 0;
 bool pending_g = false;
 bool show_hidden = false;
 
+enum ClaudeMode claude_mode = CM_OFF;
+SessionEntry sessions[MAX_SESSIONS];
+int session_count = 0;
+int session_selected = 0;
+int session_top = 0;
+char workspaces_root[MAX_PATH];
+char claude_workspace[MAX_PATH];      // anchor path of the open workspace
+char claude_workspace_name[MAX_PATH];
+char claude_return_dir[MAX_PATH];     // where to go back to on exit
+
 enum MarkStatus mark_status = MARKED;
 // =========================== Global Variables ==============================
 int main() {
@@ -264,7 +302,28 @@ void DrawScreen() {
     // Re-clamp scroll state against the *current* window size. The window may
     // have been resized since the last keypress, which would otherwise let the
     // cursor draw below write past the end of the buffer.
-    if (current_directory_file_count == 0) {
+    if (claude_mode == CM_SESSIONS) {
+        if (session_count == 0) {
+            session_selected = 0;
+            session_top = 0;
+        } else {
+            if (session_selected >= session_count) {
+                session_selected = session_count - 1;
+            }
+            if (session_top > session_count - list_height) {
+                session_top = session_count - list_height;
+            }
+            if (session_top < 0) {
+                session_top = 0;
+            }
+            if (session_top > session_selected) {
+                session_top = session_selected;
+            }
+            if (session_selected - session_top >= list_height) {
+                session_top = session_selected - list_height + 1;
+            }
+        }
+    } else if (current_directory_file_count == 0) {
         selected_row = 0;
         top_row = 0;
     } else {
@@ -310,14 +369,19 @@ void DrawScreen() {
     // ============================= Draw Header Line ==================================
     {
         char right_info[48];
-        char mark_char = mark_status == YANKED ? 'Y' : (mark_status == CUT ? 'X' : '*');
-        int position = current_directory_file_count == 0 ? 0 : selected_row + 1;
-        if (marked_files_count > 0) {
-            snprintf(right_info, sizeof(right_info), "%c%d  %d/%d",
-                     mark_char, marked_files_count, position, current_directory_file_count);
+        if (claude_mode == CM_SESSIONS) {
+            int position = session_count == 0 ? 0 : session_selected + 1;
+            snprintf(right_info, sizeof(right_info), "%d/%d", position, session_count);
         } else {
-            snprintf(right_info, sizeof(right_info), "%d/%d",
-                     position, current_directory_file_count);
+            int position = current_directory_file_count == 0 ? 0 : selected_row + 1;
+            if (marked_files_count > 0) {
+                char mark_char = mark_status == YANKED ? 'Y' : (mark_status == CUT ? 'X' : '*');
+                snprintf(right_info, sizeof(right_info), "%c%d  %d/%d",
+                         mark_char, marked_files_count, position, current_directory_file_count);
+            } else {
+                snprintf(right_info, sizeof(right_info), "%d/%d",
+                         position, current_directory_file_count);
+            }
         }
 
         int right_col = width - (int)strlen(right_info) - 1;
@@ -326,19 +390,21 @@ void DrawScreen() {
         }
 
         // Path on the left, truncated from the front so the deepest (most
-        // useful) part stays visible
+        // useful) part stays visible. Yellow while in the claude browser.
+        char* header_path = claude_mode == CM_SESSIONS ? claude_workspace : current_directory;
+        WORD header_color = claude_mode == CM_OFF ? blue : yellow;
         int path_avail = right_col - 2;
-        int path_len = (int)strlen(current_directory);
+        int path_len = (int)strlen(header_path);
         char path_display[MAX_PATH + 4];
         if (path_len <= path_avail) {
-            strcpy(path_display, current_directory);
+            strcpy(path_display, header_path);
         } else if (path_avail > 3) {
             snprintf(path_display, sizeof(path_display), "...%s",
-                     current_directory + (path_len - (path_avail - 3)));
+                     header_path + (path_len - (path_avail - 3)));
         } else {
             path_display[0] = '\0';
         }
-        WriteToBuffer(buffer, width, 0, 0, path_display, blue);
+        WriteToBuffer(buffer, width, 0, 0, path_display, header_color);
     }
 
     // Horizontal rule under the header, with a junction where it crosses
@@ -352,7 +418,7 @@ void DrawScreen() {
     // ============================= Draw Header Line ==================================
 
     // ============================= Draw Parent Directory =============================
-    for (int i = 0; i < list_height && i < parent_directory_file_count; i++) {
+    for (int i = 0; claude_mode != CM_SESSIONS && i < list_height && i < parent_directory_file_count; i++) {
         int file_index = i;
 
         color = FileColor(&parent_directory_files[file_index]);
@@ -385,7 +451,7 @@ void DrawScreen() {
     // ============================= Draw Column Divider ===============================
 
     // ============================= Draw Current Directory ============================
-    for (int i = 0; i < list_height && top_row + i < current_directory_file_count; i++) {
+    for (int i = 0; claude_mode != CM_SESSIONS && i < list_height && top_row + i < current_directory_file_count; i++) {
         int file_index = top_row + i;
         bool is_selected = (file_index == selected_row);
 
@@ -453,12 +519,16 @@ void DrawScreen() {
     // ============================= Draw Current Directory ============================
 
     // Empty directories get an explicit placeholder instead of a blank pane
-    if (current_directory_file_count == 0) {
+    if (claude_mode != CM_SESSIONS && current_directory_file_count == 0) {
         WriteToBuffer(buffer, width, 2, COLUMN_DIVIDER_POSITION + 4, "(empty)", gray);
     }
 
-    if (three_pane && current_directory_file_count > 0) {
+    if (three_pane && claude_mode != CM_SESSIONS && current_directory_file_count > 0) {
         DrawContextPane(buffer, width, height, divider2);
+    }
+
+    if (claude_mode == CM_SESSIONS) {
+        DrawSessionsPanes(buffer, width, height, divider2, list_height);
     }
 
     COORD buffer_size = { (SHORT)width, (SHORT)height };
@@ -599,6 +669,265 @@ void FormatSize(ULONGLONG size, char* out, int out_size) {
 }
 // ============================= Context Pane ======================================
 
+// ============================= Claude Workspaces =================================
+void EnterClaudeMode() {
+    char home[MAX_PATH];
+    DWORD len = GetEnvironmentVariable("DRIFT_HOME", home, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        len = GetEnvironmentVariable("USERPROFILE", home, MAX_PATH);
+    }
+    if (len == 0 || len >= MAX_PATH) return;
+
+    char path[MAX_PATH];
+    if (snprintf(path, MAX_PATH, "%s\\.drift", home) >= MAX_PATH) return;
+    CreateDirectory(path, NULL); // ok if it already exists
+    if (snprintf(path, MAX_PATH, "%s\\.drift\\workspaces", home) >= MAX_PATH) return;
+    CreateDirectory(path, NULL);
+
+    strcpy(claude_return_dir, current_directory);
+    strcpy(workspaces_root, path);
+    ChangeCurrentDirectory(workspaces_root);
+    claude_mode = CM_WORKSPACES;
+}
+
+void ExitClaudeMode() {
+    claude_mode = CM_OFF;
+    ChangeCurrentDirectory(claude_return_dir);
+}
+
+void EnterSessionsView() {
+    char* name = current_directory_files[selected_row].cFileName;
+    if (snprintf(claude_workspace, MAX_PATH, "%s\\%s", workspaces_root, name) >= MAX_PATH) {
+        return;
+    }
+    snprintf(claude_workspace_name, MAX_PATH, "%s", name);
+    LoadSessions();
+    session_selected = 0;
+    session_top = 0;
+    claude_mode = CM_SESSIONS;
+}
+
+// Claude Code stores each project's session transcripts in a folder named
+// after the launch directory with special characters flattened to dashes.
+// The scheme is undocumented, so LoadSessions tries both dot variants.
+void EncodeProjectPath(const char* path, char* out, bool keep_dots) {
+    int n = 0;
+    for (int i = 0; path[i] != '\0' && n < MAX_PATH - 1; i++) {
+        unsigned char ch = (unsigned char)path[i];
+        bool keep = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                    (ch >= '0' && ch <= '9') || ch == '-' || (keep_dots && ch == '.');
+        out[n++] = keep ? (char)ch : '-';
+    }
+    out[n] = '\0';
+}
+
+void LoadSessions() {
+    session_count = 0;
+
+    char claude_root[MAX_PATH];
+    DWORD len = GetEnvironmentVariable("DRIFT_CLAUDE_DIR", claude_root, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        char home[MAX_PATH];
+        len = GetEnvironmentVariable("USERPROFILE", home, MAX_PATH);
+        if (len == 0 || len >= MAX_PATH) return;
+        if (snprintf(claude_root, MAX_PATH, "%s\\.claude", home) >= MAX_PATH) return;
+    }
+
+    char enc[MAX_PATH];
+    char dir[MAX_PATH];
+    EncodeProjectPath(claude_workspace, enc, false);
+    if (snprintf(dir, MAX_PATH, "%s\\projects\\%s", claude_root, enc) >= MAX_PATH) return;
+    if (GetFileAttributes(dir) == INVALID_FILE_ATTRIBUTES) {
+        EncodeProjectPath(claude_workspace, enc, true);
+        if (snprintf(dir, MAX_PATH, "%s\\projects\\%s", claude_root, enc) >= MAX_PATH) return;
+        if (GetFileAttributes(dir) == INVALID_FILE_ATTRIBUTES) return; // no sessions yet
+    }
+
+    char search[MAX_PATH];
+    if (snprintf(search, MAX_PATH, "%s\\*.jsonl", dir) >= MAX_PATH) return;
+
+    WIN32_FIND_DATA fd;
+    HANDLE hFind = FindFirstFile(search, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+
+        SessionEntry* s = &sessions[session_count];
+        if (snprintf(s->path, MAX_PATH, "%s\\%s", dir, fd.cFileName) >= MAX_PATH) continue;
+        snprintf(s->id, sizeof(s->id), "%s", fd.cFileName);
+        char* dot = strrchr(s->id, '.');
+        if (dot != NULL) *dot = '\0';
+        s->mtime = fd.ftLastWriteTime;
+        ParseSessionTitle(s->path, s->title, sizeof(s->title));
+        session_count++;
+    } while (FindNextFile(hFind, &fd) && session_count < MAX_SESSIONS);
+    FindClose(hFind);
+
+    qsort(sessions, session_count, sizeof(SessionEntry), CompareSessions);
+}
+
+int CompareSessions(const void* a, const void* b) {
+    const SessionEntry* sa = (const SessionEntry*)a;
+    const SessionEntry* sb = (const SessionEntry*)b;
+    return CompareFileTime(&sb->mtime, &sa->mtime); // newest first
+}
+
+// Shallow, read-only scan of a transcript for the first real user message.
+// The format is undocumented; on any surprise the title just stays generic.
+void ParseSessionTitle(const char* path, char* out, int out_size) {
+    snprintf(out, out_size, "(untitled)");
+
+    FILE* f = fopen(path, "rb");
+    if (f == NULL) return;
+
+    char line[8192];
+    int scanned = 0;
+    while (scanned < 50 && fgets(line, sizeof(line), f) != NULL) {
+        size_t line_len = strlen(line);
+        bool complete = line_len > 0 && line[line_len - 1] == '\n';
+
+        if (strstr(line, "\"type\":\"user\"") != NULL) {
+            char* p = strstr(line, "\"content\":\"");
+            int skip = 11;
+            if (p == NULL) {
+                p = strstr(line, "\"text\":\"");
+                skip = 8;
+            }
+            if (p != NULL) {
+                p += skip;
+                int n = 0;
+                while (*p != '\0' && *p != '"' && n < out_size - 1) {
+                    if (*p == '\\') {
+                        p++;
+                        if (*p == 'n' || *p == 't') {
+                            out[n++] = ' ';
+                            p++;
+                        } else if (*p == 'u') {
+                            out[n++] = '?';
+                            p++;
+                            for (int k = 0; k < 4 && *p != '\0'; k++) p++;
+                        } else if (*p != '\0') {
+                            out[n++] = *p++;
+                        }
+                    } else {
+                        out[n++] = *p++;
+                    }
+                }
+                out[n] = '\0';
+                // Skip command wrappers and the session-start caveat notice
+                if (n > 0 && out[0] != '<' && strncmp(out, "Caveat", 6) != 0) {
+                    fclose(f);
+                    return;
+                }
+                snprintf(out, out_size, "(untitled)");
+            }
+        }
+
+        if (!complete) { // consume the rest of an over-long line
+            int ch;
+            while ((ch = fgetc(f)) != '\n' && ch != EOF) {}
+        }
+        scanned++;
+    }
+    fclose(f);
+}
+
+void FormatAge(FILETIME ft, char* out, int out_size) {
+    FILETIME now_ft;
+    GetSystemTimeAsFileTime(&now_ft);
+    ULONGLONG a = ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    ULONGLONG b = ((ULONGLONG)now_ft.dwHighDateTime << 32) | now_ft.dwLowDateTime;
+    ULONGLONG s = b > a ? (b - a) / 10000000ULL : 0;
+    if (s < 60) snprintf(out, out_size, "now");
+    else if (s < 3600) snprintf(out, out_size, "%um", (unsigned)(s / 60));
+    else if (s < 86400) snprintf(out, out_size, "%uh", (unsigned)(s / 3600));
+    else if (s < 86400ULL * 14) snprintf(out, out_size, "%ud", (unsigned)(s / 86400));
+    else snprintf(out, out_size, "%uw", (unsigned)(s / (86400ULL * 7)));
+}
+
+// Session view: workspaces on the left for context, sessions in the middle,
+// details of the selected session in the third pane
+void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, int list_height) {
+    wchar_t wname[MAX_PATH];
+
+    // Left pane: workspace list, the open one in white
+    for (int i = 0; i < list_height && i < current_directory_file_count; i++) {
+        WIN32_FIND_DATA* w = &current_directory_files[i];
+        WORD c = strcmp(w->cFileName, claude_workspace_name) == 0 ? white : blue;
+        if (!IsDirectory(w)) c = gray;
+        AnsiToWide(w->cFileName, wname, MAX_PATH);
+        int len = (int)wcslen(wname);
+        for (int col = 0; col < len && col < COLUMN_DIVIDER_POSITION - 2; col++) {
+            int index = (i + 2) * width + col;
+            buffer[index].Char.UnicodeChar = wname[col];
+            buffer[index].Attributes = c;
+        }
+    }
+
+    // Middle pane: sessions, newest first
+    if (session_count == 0) {
+        WriteToBuffer(buffer, width, 2, COLUMN_DIVIDER_POSITION + 2, "(no sessions)", gray);
+    }
+    for (int i = 0; i < list_height && session_top + i < session_count; i++) {
+        int idx = session_top + i;
+        bool sel = (idx == session_selected);
+        WORD attr = white;
+        if (sel) {
+            attr = bar_background; // black text on the bar
+            for (int col = COLUMN_DIVIDER_POSITION + 1; col < divider2; col++) {
+                buffer[(i + 2) * width + col].Attributes = bar_background;
+            }
+        }
+        char age[16];
+        FormatAge(sessions[idx].mtime, age, sizeof(age));
+        char row_text[160];
+        snprintf(row_text, sizeof(row_text), "%-4s %s", age, sessions[idx].title);
+        AnsiToWide(row_text, wname, MAX_PATH);
+        int len = (int)wcslen(wname);
+        for (int col = 0; col < len && COLUMN_DIVIDER_POSITION + 2 + col < divider2; col++) {
+            int index = (i + 2) * width + COLUMN_DIVIDER_POSITION + 2 + col;
+            buffer[index].Char.UnicodeChar = wname[col];
+            buffer[index].Attributes = attr;
+        }
+    }
+
+    // Third pane: selected session details
+    if (divider2 >= width || session_count == 0) return;
+    int col_start = divider2 + 2;
+    SessionEntry* sel = &sessions[session_selected];
+
+    WriteToBuffer(buffer, width, 2, col_start, claude_workspace_name, white);
+    char meta[64];
+    snprintf(meta, sizeof(meta), "%d session(s)", session_count);
+    WriteToBuffer(buffer, width, 3, col_start, meta, gray);
+
+    char age[16];
+    FormatAge(sel->mtime, age, sizeof(age));
+    snprintf(meta, sizeof(meta), "last active: %s", age);
+    WriteToBuffer(buffer, width, 5, col_start, meta, white);
+    snprintf(meta, sizeof(meta), "id: %s", sel->id);
+    WriteToBuffer(buffer, width, 6, col_start, meta, gray);
+
+    // First prompt, wrapped to the pane
+    int pane_w = width - 1 - col_start;
+    if (pane_w < 8) return;
+    int total = (int)strlen(sel->title);
+    int off = 0;
+    int row = 8;
+    while (off < total && row < height) {
+        char chunk[200];
+        int c = total - off;
+        if (c > pane_w) c = pane_w;
+        if (c > (int)sizeof(chunk) - 1) c = (int)sizeof(chunk) - 1;
+        memcpy(chunk, sel->title + off, c);
+        chunk[c] = '\0';
+        WriteToBuffer(buffer, width, row, col_start, chunk, white);
+        off += c;
+        row++;
+    }
+}
+// ============================= Claude Workspaces =================================
+
 int HandleInput() {
     INPUT_RECORD input;
     DWORD events;
@@ -612,6 +941,47 @@ int HandleInput() {
 
     BOOL ctrl = input.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
     BOOL shift= input.Event.KeyEvent.dwControlKeyState & SHIFT_PRESSED;
+
+    // Session list has its own small keymap; everything else is inert there
+    if (claude_mode == CM_SESSIONS) {
+        pending_g = false;
+        WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+        if (vk == 'Q') {
+            return 0;
+        } else if (vk == 'J' && session_selected < session_count - 1) {
+            session_selected++;
+        } else if (vk == 'K' && session_selected > 0) {
+            session_selected--;
+        } else if (vk == 'G' && shift && session_count > 0) {
+            session_selected = session_count - 1;
+        } else if (vk == 'H' || vk == VK_ESCAPE) {
+            claude_mode = CM_WORKSPACES;
+        } else if (vk == 'C') {
+            ExitClaudeMode();
+        }
+        return 1;
+    }
+
+    // Workspace list is a real directory browsed normally, with a few verbs
+    // rerouted: l/Enter opens the session view instead of entering the dir,
+    // h/c/Esc leave the mode, and jumps that would teleport away are inert
+    if (claude_mode == CM_WORKSPACES && !ctrl && !shift) {
+        WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+        if (vk == 'L' || vk == VK_RETURN) {
+            if (current_directory_file_count > 0 &&
+                IsDirectory(&current_directory_files[selected_row])) {
+                EnterSessionsView();
+            }
+            return 1;
+        }
+        if (vk == 'H' || vk == 'C' || vk == VK_ESCAPE) {
+            ExitClaudeMode();
+            return 1;
+        }
+        if (vk == 'O' || vk == VK_OEM_3) {
+            return 1;
+        }
+    }
 
     if (shift) {
         pending_g = false;
@@ -772,6 +1142,10 @@ int HandleInput() {
                 if (parent_directory[0] != '\0') {
                     LoadParentDirectory();
                 }
+                break;
+            }
+            case 'C': {
+                EnterClaudeMode();
                 break;
             }
             case 'Q': {
@@ -1423,6 +1797,9 @@ void HandleCreate() {
     if (is_directory) {
         name[len - 1] = '\0';
         if (name[0] == '\0') return;
+    }
+    if (claude_mode == CM_WORKSPACES) {
+        is_directory = true; // workspaces are always directories
     }
 
     char full_path[MAX_PATH];
