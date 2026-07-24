@@ -25,6 +25,11 @@
 // - A        : Create new file/directory (append '\' to name for directory)
 // - .        : Toggle showing hidden files (hidden by default)
 //
+// Layout: three panes when the window is at least 80 columns wide --
+// parent | current | context. The context pane previews the selected item:
+// first lines of a text file, the listing of a directory, or a size note
+// for binary files. Narrower windows fall back to the two-pane layout.
+//
 // Known limitations: filenames outside the system ANSI codepage are not
 // supported -- they list with '?' placeholders and file operations on them
 // are refused, since the mangled name would act as a wildcard (full support
@@ -63,6 +68,9 @@
 #define CREATE_POPUP_WIDTH 50
 #define COLUMN_DIVIDER_POSITION 28
 #define MIN_WINDOW_WIDTH (COLUMN_DIVIDER_POSITION + 8)
+// Third (context/preview) pane appears when the window is at least this wide
+#define THREE_PANE_MIN_WIDTH 80
+#define PREVIEW_BYTES 4096
 
 enum MarkStatus {
     MARKED,
@@ -94,6 +102,9 @@ int CompareFiles(const void* a, const void* b);
 void GetParentDirectory(char* path, char* parent);
 bool IsDirectory(WIN32_FIND_DATA* file_data);
 WORD FileColor(WIN32_FIND_DATA* file);
+void DrawContextPane(CHAR_INFO* buffer, int width, int height, int divider2);
+void LoadPreview();
+void FormatSize(ULONGLONG size, char* out, int out_size);
 bool GetSelectedRowPath(int selected_row, char* out_path);
 bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file_data, char* out_path);
 int CalculateDistance(char* current, char* target);
@@ -149,6 +160,18 @@ DirectoryState history[MAX_FILES];
 MarkedFile marked_files[MAX_FILES];
 WIN32_FIND_DATA current_directory_files[MAX_FILES];
 WIN32_FIND_DATA parent_directory_files[MAX_FILES];
+
+// Context (preview) pane state, cached by the selected path so the file or
+// directory is only re-read when the cursor moves to a different item
+WIN32_FIND_DATA preview_files[MAX_FILES];
+int preview_file_count;
+char preview_path[MAX_PATH];
+char preview_bytes[PREVIEW_BYTES];
+int preview_len;
+ULONGLONG preview_size;
+bool preview_is_dir;
+bool preview_binary;
+bool preview_unreadable;
 
 char mark_directory[MAX_PATH];
 char parent_directory[MAX_PATH];
@@ -222,6 +245,11 @@ void DrawScreen() {
     }
 
     int list_height = height - 2; // row 0 is the header, row 1 the rule
+
+    // Three panes (parent | current | context) when there is room; otherwise
+    // divider2 sits at the right edge and the layout degrades to two panes
+    bool three_pane = width >= THREE_PANE_MIN_WIDTH;
+    int divider2 = three_pane ? width - width / 3 : width;
 
     // Re-clamp scroll state against the *current* window size. The window may
     // have been resized since the last keypress, which would otherwise let the
@@ -307,7 +335,8 @@ void DrawScreen() {
     // the column divider
     for (int col = 0; col < width; col++) {
         int index = width + col;
-        buffer[index].Char.UnicodeChar = (col == COLUMN_DIVIDER_POSITION) ? BOX_T_DOWN : BOX_HORIZONTAL;
+        bool junction = col == COLUMN_DIVIDER_POSITION || (three_pane && col == divider2);
+        buffer[index].Char.UnicodeChar = junction ? BOX_T_DOWN : BOX_HORIZONTAL;
         buffer[index].Attributes = blue;
     }
     // ============================= Draw Header Line ==================================
@@ -336,6 +365,13 @@ void DrawScreen() {
         buffer[index].Char.UnicodeChar = BOX_VERTICAL;
         buffer[index].Attributes = color;
     }
+    if (three_pane) {
+        for (int i = 2; i < height; i++) {
+            int index = i * width + divider2;
+            buffer[index].Char.UnicodeChar = BOX_VERTICAL;
+            buffer[index].Attributes = color;
+        }
+    }
     // ============================= Draw Column Divider ===============================
 
     // ============================= Draw Current Directory ============================
@@ -353,7 +389,7 @@ void DrawScreen() {
                 fg = 0;
             }
             color = fg | bar_background;
-            for (int col = COLUMN_DIVIDER_POSITION + 1; col < width; col++) {
+            for (int col = COLUMN_DIVIDER_POSITION + 1; col < divider2; col++) {
                 buffer[(i + 2) * width + col].Attributes = color;
             }
         }
@@ -361,7 +397,7 @@ void DrawScreen() {
         AnsiToWide(current_directory_files[file_index].cFileName, wname, MAX_PATH);
         int len = (int)wcslen(wname);
 
-        for (int col = 0; col < len && col + COLUMN_DIVIDER_POSITION + 4 < width; col++) {
+        for (int col = 0; col < len && col + COLUMN_DIVIDER_POSITION + 4 < divider2; col++) {
             int index = (i + 2) * width + COLUMN_DIVIDER_POSITION + 4 + col;
             buffer[index].Char.UnicodeChar = wname[col];
             buffer[index].Attributes = color;
@@ -411,6 +447,10 @@ void DrawScreen() {
         WriteToBuffer(buffer, width, 2, COLUMN_DIVIDER_POSITION + 4, "(empty)", gray);
     }
 
+    if (three_pane && current_directory_file_count > 0) {
+        DrawContextPane(buffer, width, height, divider2);
+    }
+
     COORD buffer_size = { (SHORT)width, (SHORT)height };
     COORD origin = { 0, 0 };
     // Anchor the write region to the visible window rather than the buffer
@@ -423,6 +463,131 @@ void DrawScreen() {
     };
     WriteConsoleOutputW(hAlt, buffer, buffer_size, origin, &region);
 }
+
+// ============================= Context Pane ======================================
+// Reads the selected item into the preview cache: directory listing for
+// directories, the first PREVIEW_BYTES for files (NUL byte anywhere in the
+// head means binary)
+void LoadPreview() {
+    preview_len = 0;
+    preview_file_count = 0;
+    preview_binary = false;
+    preview_unreadable = false;
+
+    WIN32_FIND_DATA* sel = &current_directory_files[selected_row];
+    preview_is_dir = IsDirectory(sel);
+    preview_size = ((ULONGLONG)sel->nFileSizeHigh << 32) | sel->nFileSizeLow;
+
+    char path[MAX_PATH];
+    if (!GetSelectedRowPath(selected_row, path)) {
+        preview_unreadable = true;
+        return;
+    }
+
+    if (preview_is_dir) {
+        preview_file_count = GetFilesInDirectory(path, preview_files);
+        return;
+    }
+
+    FILE* f = fopen(path, "rb");
+    if (f == NULL) {
+        preview_unreadable = true;
+        return;
+    }
+    preview_len = (int)fread(preview_bytes, 1, PREVIEW_BYTES, f);
+    fclose(f);
+
+    preview_binary = memchr(preview_bytes, '\0', preview_len) != NULL;
+
+    // Strip a UTF-8 BOM so it doesn't render as garbage
+    if (preview_len >= 3 && (unsigned char)preview_bytes[0] == 0xEF &&
+        (unsigned char)preview_bytes[1] == 0xBB && (unsigned char)preview_bytes[2] == 0xBF) {
+        memmove(preview_bytes, preview_bytes + 3, preview_len - 3);
+        preview_len -= 3;
+    }
+}
+
+void DrawContextPane(CHAR_INFO* buffer, int width, int height, int divider2) {
+    char sel_path[MAX_PATH];
+    if (!GetSelectedRowPath(selected_row, sel_path)) {
+        sel_path[0] = '\0';
+    }
+    if (strcmp(sel_path, preview_path) != 0) {
+        strcpy(preview_path, sel_path);
+        LoadPreview();
+    }
+
+    int col_start = divider2 + 2;
+
+    if (preview_unreadable) {
+        WriteToBuffer(buffer, width, 2, col_start, "(cannot preview)", gray);
+        return;
+    }
+
+    if (preview_is_dir) {
+        if (preview_file_count == 0) {
+            WriteToBuffer(buffer, width, 2, col_start, "(empty)", gray);
+            return;
+        }
+        for (int i = 0; i + 2 < height && i < preview_file_count; i++) {
+            WriteToBuffer(buffer, width, 2 + i, col_start,
+                          preview_files[i].cFileName, FileColor(&preview_files[i]));
+        }
+        return;
+    }
+
+    if (preview_binary) {
+        char size_str[32];
+        char msg[64];
+        FormatSize(preview_size, size_str, sizeof(size_str));
+        snprintf(msg, sizeof(msg), "(binary - %s)", size_str);
+        WriteToBuffer(buffer, width, 2, col_start, msg, gray);
+        return;
+    }
+
+    if (preview_len == 0) {
+        WriteToBuffer(buffer, width, 2, col_start, "(empty file)", gray);
+        return;
+    }
+
+    // Text file: one source line per row, tabs expanded, control chars blanked
+    int row = 2;
+    int line_start = 0;
+    for (int i = 0; i <= preview_len && row < height; i++) {
+        if (i == preview_len || preview_bytes[i] == '\n') {
+            char line[256];
+            int n = 0;
+            for (int j = line_start; j < i && n < (int)sizeof(line) - 1; j++) {
+                unsigned char ch = (unsigned char)preview_bytes[j];
+                if (ch == '\r') continue;
+                if (ch == '\t') {
+                    for (int t = 0; t < 4 && n < (int)sizeof(line) - 1; t++) line[n++] = ' ';
+                } else if (ch < 32) {
+                    line[n++] = ' ';
+                } else {
+                    line[n++] = (char)ch;
+                }
+            }
+            line[n] = '\0';
+            WriteToBuffer(buffer, width, row, col_start, line, white);
+            row++;
+            line_start = i + 1;
+        }
+    }
+}
+
+void FormatSize(ULONGLONG size, char* out, int out_size) {
+    if (size < 1024ULL) {
+        snprintf(out, out_size, "%u B", (unsigned)size);
+    } else if (size < 1024ULL * 1024) {
+        snprintf(out, out_size, "%.1f KB", size / 1024.0);
+    } else if (size < 1024ULL * 1024 * 1024) {
+        snprintf(out, out_size, "%.1f MB", size / (1024.0 * 1024));
+    } else {
+        snprintf(out, out_size, "%.1f GB", size / (1024.0 * 1024 * 1024));
+    }
+}
+// ============================= Context Pane ======================================
 
 int HandleInput() {
     INPUT_RECORD input;
@@ -1553,6 +1718,7 @@ void LoadCurrentDirectory() {
     current_directory_file_count = GetFilesInDirectory(current_directory, current_directory_files);
     selected_row = 0;
     top_row = 0;
+    preview_path[0] = '\0'; // contents may have changed under the same path
 }
 
 // Refresh in place -- used after paste/delete/create/vim so the cursor
@@ -1565,6 +1731,7 @@ void ReloadCurrentDirectory() {
     if (selected_row < 0) {
         selected_row = 0;
     }
+    preview_path[0] = '\0'; // contents may have changed under the same path
 }
 
 void SetMarkStatus(enum MarkStatus status) {

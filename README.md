@@ -4,7 +4,8 @@ A fast, vim-style terminal file browser for Windows.
 
 ## Features
 
-- **Miller columns** - Parent directory on the left, current directory on the right
+- **Miller columns** - Parent directory on the left, current directory in the middle
+- **Preview pane** - Right column previews text files, directory contents, and binary sizes (windows 80+ columns wide)
 - **Vim-style navigation** - hjkl movement, gg/G for top/bottom
 - **File operations** - Copy, move, delete with recycle bin support
 - **Batch marking** - Mark multiple files for bulk operations
