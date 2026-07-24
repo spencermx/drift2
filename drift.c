@@ -137,6 +137,7 @@ int CompareSessions(const void* a, const void* b);
 void FormatAge(FILETIME ft, char* out, int out_size);
 void EncodeProjectPath(const char* path, char* out, bool keep_dots);
 void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, int list_height);
+void DrawClaudeInfoPane(CHAR_INFO* buffer, int width, int height, int divider2);
 bool GetSelectedRowPath(int selected_row, char* out_path);
 bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file_data, char* out_path);
 int CalculateDistance(char* current, char* target);
@@ -178,6 +179,9 @@ WORD red = FOREGROUND_RED | FOREGROUND_INTENSITY;
 WORD green = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
 WORD yellow = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
 WORD gray = FOREGROUND_INTENSITY;
+// Dark yellow renders as the console's golden/orange tone -- the closest
+// 16-color match to Claude's brand color; used for the frame in claude mode
+WORD orange = FOREGROUND_RED | FOREGROUND_GREEN;
 // Selection bar: light-gray background; row foregrounds are remapped to
 // their dark variants so the text stays readable on it
 WORD bar_background = BACKGROUND_RED | BACKGROUND_GREEN | BACKGROUND_BLUE;
@@ -390,8 +394,19 @@ void DrawScreen() {
         }
 
         // Path on the left, truncated from the front so the deepest (most
-        // useful) part stays visible. Yellow while in the claude browser.
-        char* header_path = claude_mode == CM_SESSIONS ? claude_workspace : current_directory;
+        // useful) part stays visible. The claude browser announces itself
+        // with a title instead of a filesystem path, in yellow.
+        char claude_title[MAX_PATH + 32];
+        char* header_path;
+        if (claude_mode == CM_WORKSPACES) {
+            snprintf(claude_title, sizeof(claude_title), "claude workspaces");
+            header_path = claude_title;
+        } else if (claude_mode == CM_SESSIONS) {
+            snprintf(claude_title, sizeof(claude_title), "claude workspaces > %s", claude_workspace_name);
+            header_path = claude_title;
+        } else {
+            header_path = current_directory;
+        }
         WORD header_color = claude_mode == CM_OFF ? blue : yellow;
         int path_avail = right_col - 2;
         int path_len = (int)strlen(header_path);
@@ -409,11 +424,13 @@ void DrawScreen() {
 
     // Horizontal rule under the header, with a junction where it crosses
     // the column divider
+    // Frame follows the mode: blue for files, claude-orange in claude mode
+    WORD frame_color = claude_mode == CM_OFF ? blue : orange;
     for (int col = 0; col < width; col++) {
         int index = width + col;
         bool junction = col == COLUMN_DIVIDER_POSITION || (three_pane && col == divider2);
         buffer[index].Char.UnicodeChar = junction ? BOX_T_DOWN : BOX_HORIZONTAL;
-        buffer[index].Attributes = blue;
+        buffer[index].Attributes = frame_color;
     }
     // ============================= Draw Header Line ==================================
 
@@ -422,6 +439,9 @@ void DrawScreen() {
         int file_index = i;
 
         color = FileColor(&parent_directory_files[file_index]);
+        if (claude_mode != CM_OFF && color == blue) {
+            color = yellow; // claude mode: directories join the claude palette
+        }
 
         AnsiToWide(parent_directory_files[file_index].cFileName, wname, MAX_PATH);
         int len = (int)wcslen(wname);
@@ -435,17 +455,16 @@ void DrawScreen() {
     // ============================= Draw Parent Directory =============================
 
     // ============================= Draw Column Divider ===============================
-    color = blue;
     for (int i = 2; i < height; i++) {
         int index = i * width + COLUMN_DIVIDER_POSITION;
         buffer[index].Char.UnicodeChar = BOX_VERTICAL;
-        buffer[index].Attributes = color;
+        buffer[index].Attributes = frame_color;
     }
     if (three_pane) {
         for (int i = 2; i < height; i++) {
             int index = i * width + divider2;
             buffer[index].Char.UnicodeChar = BOX_VERTICAL;
-            buffer[index].Attributes = color;
+            buffer[index].Attributes = frame_color;
         }
     }
     // ============================= Draw Column Divider ===============================
@@ -456,6 +475,9 @@ void DrawScreen() {
         bool is_selected = (file_index == selected_row);
 
         color = FileColor(&current_directory_files[file_index]);
+        if (claude_mode != CM_OFF && color == blue) {
+            color = yellow; // claude mode: directories join the claude palette
+        }
 
         if (is_selected) {
             // Remap the foreground to its dark variant (white becomes black)
@@ -523,8 +545,12 @@ void DrawScreen() {
         WriteToBuffer(buffer, width, 2, COLUMN_DIVIDER_POSITION + 4, "(empty)", gray);
     }
 
-    if (three_pane && claude_mode != CM_SESSIONS && current_directory_file_count > 0) {
+    if (three_pane && claude_mode == CM_OFF && current_directory_file_count > 0) {
         DrawContextPane(buffer, width, height, divider2);
+    }
+
+    if (three_pane && claude_mode == CM_WORKSPACES) {
+        DrawClaudeInfoPane(buffer, width, height, divider2);
     }
 
     if (claude_mode == CM_SESSIONS) {
@@ -853,7 +879,7 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
     // Left pane: workspace list, the open one in white
     for (int i = 0; i < list_height && i < current_directory_file_count; i++) {
         WIN32_FIND_DATA* w = &current_directory_files[i];
-        WORD c = strcmp(w->cFileName, claude_workspace_name) == 0 ? white : blue;
+        WORD c = strcmp(w->cFileName, claude_workspace_name) == 0 ? white : yellow;
         if (!IsDirectory(w)) c = gray;
         AnsiToWide(w->cFileName, wname, MAX_PATH);
         int len = (int)wcslen(wname);
@@ -925,6 +951,27 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
         off += c;
         row++;
     }
+}
+// In the workspace list, the third pane explains what this mode is and how
+// to drive it instead of uselessly previewing the anchor directory
+void DrawClaudeInfoPane(CHAR_INFO* buffer, int width, int height, int divider2) {
+    int col = divider2 + 2;
+    if (col >= width - 8) return;
+
+    WriteToBuffer(buffer, width, 2, col, "Claude Workspaces", yellow);
+    WriteToBuffer(buffer, width, 4, col, "A workspace is a set of folders", gray);
+    WriteToBuffer(buffer, width, 5, col, "Claude Code opens together.", gray);
+
+    char count_msg[48];
+    snprintf(count_msg, sizeof(count_msg), "%d workspace(s)", current_directory_file_count);
+    WriteToBuffer(buffer, width, 7, col, count_msg, white);
+
+    int row = 9;
+    if (row < height) WriteToBuffer(buffer, width, row++, col, "l      open sessions", white);
+    if (row < height) WriteToBuffer(buffer, width, row++, col, "a      new workspace", white);
+    if (row < height) WriteToBuffer(buffer, width, row++, col, "y/p    duplicate", white);
+    if (row < height) WriteToBuffer(buffer, width, row++, col, "d      delete", white);
+    if (row < height) WriteToBuffer(buffer, width, row++, col, "h/c    back to files", white);
 }
 // ============================= Claude Workspaces =================================
 
