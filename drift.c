@@ -203,6 +203,7 @@ void SetSessionName(const char* anchor, const char* id, const char* name);
 void WorkspaceDisplayName(const char* folder, char* out, size_t out_size);
 void SetWorkspaceName(const char* folder, const char* display);
 bool WorkspaceNameTaken(const char* name, const char* except_folder);
+void NotifyAndWait(const char* text);
 void NotifyNameTaken(const char* name);
 void HandleRenameWorkspace();
 void HandleRenameSession();
@@ -1298,15 +1299,21 @@ bool WorkspaceNameTaken(const char* name, const char* except_folder) {
 
 // Report a rejected name and wait for a keypress -- ShowStatusBanner alone is
 // wiped by the next redraw, so it needs an explicit acknowledgement to be seen
-void NotifyNameTaken(const char* name) {
-    char msg[160];
-    snprintf(msg, sizeof(msg), "\"%s\" is already in use -- press a key", name);
-    ShowStatusBanner(msg);
+// The banner is painted once and the next DrawScreen would wipe it, so hold
+// the frame until the user acknowledges it
+void NotifyAndWait(const char* text) {
+    ShowStatusBanner(text);
     INPUT_RECORD ir;
     DWORD ev;
     while (ReadConsoleInput(hIn, &ir, 1, &ev) &&
            (ir.EventType != KEY_EVENT || !ir.Event.KeyEvent.bKeyDown)) {
     }
+}
+
+void NotifyNameTaken(const char* name) {
+    char msg[160];
+    snprintf(msg, sizeof(msg), "\"%s\" is already in use -- press a key", name);
+    NotifyAndWait(msg);
 }
 
 // 'r' in the session list: edit the drift-side display title in the same
@@ -3503,6 +3510,17 @@ void HandleCreate() {
     if (is_directory) {
         name[len - 1] = '\0';
         if (name[0] == '\0') return;
+    }
+
+    // The name is joined onto current_directory, so anything that could aim it
+    // elsewhere has to be refused: ".." creates in the parent, and a separator
+    // either fails or lands somewhere this pane is not showing -- both without
+    // a trace, since the cursor lookup below then finds nothing. The trailing
+    // '\' directory marker was already stripped above
+    if (strpbrk(name, "\\/:*?\"<>|") != NULL ||
+        strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        NotifyAndWait("That name cannot be used -- press a key");
+        return;
     }
 
     char full_path[MAX_PATH];
