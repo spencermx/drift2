@@ -2902,7 +2902,13 @@ void OpenFileInEditor() {
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi;
 
-    if (have_vim && CreateProcess(vim_exe, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    // current_directory as the child's working directory: drift never calls
+    // SetCurrentDirectory, so the process cwd is wherever it was launched, and
+    // the editor's :pwd, relative :e and file-browsing plugins would all
+    // resolve there rather than in the directory on screen. LaunchClaudeIn
+    // anchors its child the same way
+    if (have_vim && CreateProcess(vim_exe, command, NULL, NULL, FALSE, 0, NULL,
+                                  current_directory, &si, &pi)) {
         WaitForSingleObject(pi.hProcess, INFINITE);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
@@ -3848,6 +3854,11 @@ void DrawOldHistoryPopup(int width, int height, DistanceEntry* distances, int di
     // Title
     char* title = "Visited Directories";
     int title_col = (width - (int)strlen(title)) / 2;
+    // HandleOldHistory clamps the popup to the screen and only refuses below
+    // 10 columns, so a narrow window centres this title at a negative column.
+    // The write stays inside the buffer but starts back on the previous row,
+    // painting over the top border and the left edge
+    if (title_col < 1) title_col = 1;
     WriteToBuffer(out_buffer, width, 1, title_col, title, blue);
 
     // List entries
