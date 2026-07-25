@@ -38,6 +38,11 @@
 //              workspace's .claude\settings.json additionalDirectories.
 // - Shift+W  : (while browsing) add the directory under the cursor to a
 //              workspace picked from a popup
+// - Enter/L  : (session list) resume the session in claude, anchored in the
+//              workspace; N starts a new session (works from the workspace
+//              list too). claude is spawned via "cmd /c claude" so both a
+//              native exe and the npm .cmd shim resolve.
+// Run "drift -c" to start directly in the claude workspace browser.
 //
 // Layout: three panes when the window is at least 80 columns wide --
 // parent | current | context. The context pane previews the selected item:
@@ -157,6 +162,7 @@ void ToggleMemberUnderCursor();
 void EnterEditMode();
 void ExitEditMode();
 void HandleQuickAdd();
+int LaunchClaudeIn(const char* anchor, const char* args);
 void DrawManifestPane(CHAR_INFO* buffer, int width, int height, int divider2);
 bool GetSelectedRowPath(int selected_row, char* out_path);
 bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file_data, char* out_path);
@@ -271,8 +277,13 @@ char sessions_loaded_for[MAX_PATH]; // cache key for the sessions[] array
 
 enum MarkStatus mark_status = MARKED;
 // =========================== Global Variables ==============================
-int main() {
+int main(int argc, char* argv[]) {
     Initialize();
+
+    // drift -c boots straight into the claude workspace browser
+    if (argc > 1 && strcmp(argv[1], "-c") == 0) {
+        EnterClaudeMode();
+    }
 
     do {
         DrawScreen();
@@ -798,6 +809,57 @@ void ExitClaudeMode() {
     ChangeCurrentDirectory(claude_return_dir);
 }
 
+// Suspend the TUI, run claude anchored in the workspace, resume when it
+// exits. Spawned through cmd so PATH resolution finds a native claude.exe
+// and the npm claude.cmd shim alike. Returns 0 when drift should exit
+// because a wrapper script is taking over the launch (see below).
+int LaunchClaudeIn(const char* anchor, const char* args) {
+    // Handoff mode for Wine/dev: a Windows process can't spawn the host's
+    // claude, so when DRIFT_LAUNCH_FILE is set we write the request there
+    // and exit; the wrapper (run.sh) launches claude and restarts drift
+    char launch_file[MAX_PATH];
+    DWORD lf = GetEnvironmentVariable("DRIFT_LAUNCH_FILE", launch_file, MAX_PATH);
+    if (lf > 0 && lf < MAX_PATH) {
+        FILE* f = fopen(launch_file, "wb");
+        if (f != NULL) {
+            fprintf(f, "%s\n%s\n", anchor, args);
+            fclose(f);
+            return 0; // exit drift; the wrapper takes over
+        }
+        return 1;
+    }
+
+    char command[MAX_PATH + 64];
+    if (snprintf(command, sizeof(command), "cmd /c claude%s%s",
+                 args[0] != '\0' ? " " : "", args) >= (int)sizeof(command)) {
+        return 1;
+    }
+
+    SetConsoleActiveScreenBuffer(hOriginal);
+    SetConsoleMode(hIn, original_console_mode);
+
+    STARTUPINFO si = {0};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi;
+    if (CreateProcess(NULL, command, NULL, NULL, FALSE, 0, NULL, anchor, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+
+    SetConsoleMode(hIn, (original_console_mode & ~ENABLE_PROCESSED_INPUT) | ENABLE_WINDOW_INPUT);
+    SetConsoleActiveScreenBuffer(hAlt);
+    FlushConsoleInputBuffer(hIn); // discard keys typed into the dead moment
+
+    // The session list is stale the moment claude exits: the session that
+    // just ran (or was just created) belongs at the top
+    sessions_loaded_for[0] = '\0';
+    LoadSessionsFor(anchor);
+    session_selected = 0;
+    session_top = 0;
+    return 1;
+}
+
 void EnterSessionsView() {
     char* name = current_directory_files[selected_row].cFileName;
     if (snprintf(claude_workspace, MAX_PATH, "%s\\%s", workspaces_root, name) >= MAX_PATH) {
@@ -838,15 +900,27 @@ void LoadSessionsFor(const char* anchor) {
         if (snprintf(claude_root, MAX_PATH, "%s\\.claude", home) >= MAX_PATH) return;
     }
 
+    // Try both dot variants of the encoding, and -- for Wine, where the host
+    // claude saw the anchor without its drive letter -- the drive-less forms
     char enc[MAX_PATH];
     char dir[MAX_PATH];
-    EncodeProjectPath(anchor, enc, false);
-    if (snprintf(dir, MAX_PATH, "%s\\projects\\%s", claude_root, enc) >= MAX_PATH) return;
-    if (GetFileAttributes(dir) == INVALID_FILE_ATTRIBUTES) {
-        EncodeProjectPath(anchor, enc, true);
-        if (snprintf(dir, MAX_PATH, "%s\\projects\\%s", claude_root, enc) >= MAX_PATH) return;
-        if (GetFileAttributes(dir) == INVALID_FILE_ATTRIBUTES) return; // no sessions yet
+    const char* sources[4];
+    bool dots[4];
+    int candidates = 2;
+    sources[0] = anchor; dots[0] = false;
+    sources[1] = anchor; dots[1] = true;
+    if (anchor[0] != '\0' && anchor[1] == ':') {
+        sources[2] = anchor + 2; dots[2] = false;
+        sources[3] = anchor + 2; dots[3] = true;
+        candidates = 4;
     }
+    bool found = false;
+    for (int i = 0; i < candidates && !found; i++) {
+        EncodeProjectPath(sources[i], enc, dots[i]);
+        if (snprintf(dir, MAX_PATH, "%s\\projects\\%s", claude_root, enc) >= MAX_PATH) return;
+        found = GetFileAttributes(dir) != INVALID_FILE_ATTRIBUTES;
+    }
+    if (!found) return; // no sessions yet
 
     char search[MAX_PATH];
     if (snprintf(search, MAX_PATH, "%s\\*.jsonl", dir) >= MAX_PATH) return;
@@ -997,6 +1071,9 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
     }
 
     // Third pane: selected session details
+    if (divider2 < width) {
+        WriteToBuffer(buffer, width, height - 1, divider2 + 2, "Enter resume   n new session", gray);
+    }
     if (divider2 >= width || session_count == 0) return;
     int col_start = divider2 + 2;
     SessionEntry* sel = &sessions[session_selected];
@@ -1065,6 +1142,12 @@ void LoadMembersFrom(const char* anchor) {
     member_count = 0;
     json_too_big = false;
 
+    // Under the Wine wrapper, entries are stored host-style ("/Users/...")
+    // so the host claude can read them; internally we use the drive form
+    char host_drive[8];
+    DWORD hd = GetEnvironmentVariable("DRIFT_HOST_DRIVE", host_drive, sizeof(host_drive));
+    bool host = hd > 0 && hd < sizeof(host_drive);
+
     char file[MAX_PATH];
     if (snprintf(file, MAX_PATH, "%s\\.claude\\settings.json", anchor) >= MAX_PATH) return;
     FILE* f = fopen(file, "rb");
@@ -1105,7 +1188,18 @@ void LoadMembersFrom(const char* anchor) {
             }
         }
         out[n] = '\0';
-        if (n > 0) member_count++;
+        if (n > 0) {
+            if (host && out[0] == '/') {
+                char tmp[MAX_PATH];
+                if (snprintf(tmp, sizeof(tmp), "%s%s", host_drive, out) < (int)sizeof(tmp)) {
+                    for (char* q = tmp; *q != '\0'; q++) {
+                        if (*q == '/') *q = '\\';
+                    }
+                    strcpy(out, tmp);
+                }
+            }
+            member_count++;
+        }
         while (p < stop && *p != '"') p++; // resync if the copy was truncated
         if (p < stop) p++;
     }
@@ -1124,11 +1218,27 @@ void SaveMembersTo(const char* anchor) {
     size_t cap = (size_t)MAX_MEMBERS * (MAX_PATH * 2 + 16) + 64;
     char* arr = (char*)malloc(cap);
     if (arr == NULL) return;
+    // Under the Wine wrapper, write entries host-style so the host claude
+    // can actually resolve them
+    char host_drive[8];
+    DWORD hd = GetEnvironmentVariable("DRIFT_HOST_DRIVE", host_drive, sizeof(host_drive));
+    bool host = hd > 0 && hd < sizeof(host_drive);
+    size_t hdl = host ? strlen(host_drive) : 0;
+
     size_t n = 0;
     n += snprintf(arr + n, cap - n, "[");
     for (int i = 0; i < member_count; i++) {
+        char written[MAX_PATH];
+        const char* src = members[i];
+        if (host && _strnicmp(src, host_drive, hdl) == 0 && src[hdl] == '\\') {
+            snprintf(written, sizeof(written), "%s", src + hdl);
+            for (char* q = written; *q != '\0'; q++) {
+                if (*q == '\\') *q = '/';
+            }
+            src = written;
+        }
         n += snprintf(arr + n, cap - n, "%s\n      \"", i == 0 ? "" : ",");
-        for (const char* p = members[i]; *p != '\0' && n < cap - 8; p++) {
+        for (const char* p = src; *p != '\0' && n < cap - 8; p++) {
             if (*p == '\\' || *p == '"') arr[n++] = '\\';
             arr[n++] = *p;
         }
@@ -1370,6 +1480,7 @@ void DrawClaudeHelpPane(CHAR_INFO* buffer, int width, int height) {
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "opens together.", gray);
     row++;
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "l    open sessions", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "n    new session", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "e    edit workspace", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "a    new workspace", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "y/p  duplicate", gray);
@@ -1517,6 +1628,12 @@ int HandleInput() {
             claude_mode = CM_WORKSPACES;
         } else if (vk == 'C') {
             ExitClaudeMode();
+        } else if ((vk == VK_RETURN || vk == 'L') && session_count > 0) {
+            char args[80];
+            snprintf(args, sizeof(args), "--resume %s", sessions[session_selected].id);
+            return LaunchClaudeIn(claude_workspace, args);
+        } else if (vk == 'N') {
+            return LaunchClaudeIn(claude_workspace, "");
         }
         return 1;
     }
@@ -1539,6 +1656,18 @@ int HandleInput() {
         }
         if (vk == 'E') {
             EnterEditMode();
+            return 1;
+        }
+        if (vk == 'N') {
+            // New session in the workspace under the cursor
+            if (current_directory_file_count > 0 &&
+                IsDirectory(&current_directory_files[selected_row])) {
+                char anchor[MAX_PATH];
+                if (snprintf(anchor, MAX_PATH, "%s\\%s", workspaces_root,
+                             current_directory_files[selected_row].cFileName) < MAX_PATH) {
+                    return LaunchClaudeIn(anchor, "");
+                }
+            }
             return 1;
         }
         if (vk == 'O' || vk == VK_OEM_3) {

@@ -23,9 +23,44 @@ if [ ! -f drift.exe ] || [ drift.c -nt drift.exe ]; then
     x86_64-w64-mingw32-gcc drift.c -o drift.exe
 fi
 
-# Point drift's home jump (~) at the real macOS home directory; without
-# this it would land in Wine's fake profile dir (~/.wine/drive_c/users/...)
-DRIFT_HOME="Z:$(printf '%s' "$HOME" | tr '/' '\\')"
+# Point drift's home jump (~) and workspace storage at the real macOS home;
+# without this Wine's fake profile dir (~/.wine/drive_c/users/...) is used
+HOME_WIN="Z:$(printf '%s' "$HOME" | tr '/' '\\')"
+DRIFT_HOME="$HOME_WIN"
 export DRIFT_HOME
 
-exec wine drift.exe
+# Sessions live in the real macOS ~/.claude when running under Wine
+DRIFT_CLAUDE_DIR="$HOME_WIN\\.claude"
+export DRIFT_CLAUDE_DIR
+
+# Workspace folder lists are written host-style (/Users/...) so the macOS
+# claude can read them; drift translates to Z:\ form internally
+DRIFT_HOST_DRIVE="Z:"
+export DRIFT_HOST_DRIVE
+
+# Claude launch handoff: a Windows process can't spawn the macOS claude, so
+# drift writes its launch request to this file and exits; we run claude on
+# the host and then restart drift back into the claude browser
+LAUNCH_UNIX="$HOME/.drift/claude_launch"
+DRIFT_LAUNCH_FILE="$HOME_WIN\\.drift\\claude_launch"
+export DRIFT_LAUNCH_FILE
+mkdir -p "$HOME/.drift"
+rm -f "$LAUNCH_UNIX"
+
+DRIFT_ARGS=""
+while :; do
+    wine drift.exe $DRIFT_ARGS
+    [ -f "$LAUNCH_UNIX" ] || break
+
+    ANCHOR_WIN=$(sed -n 1p "$LAUNCH_UNIX" | tr -d '\r')
+    CLAUDE_ARGS=$(sed -n 2p "$LAUNCH_UNIX" | tr -d '\r')
+    rm -f "$LAUNCH_UNIX"
+
+    case "$ANCHOR_WIN" in
+        [Zz]:*) ANCHOR_UNIX=$(printf '%s' "$ANCHOR_WIN" | cut -c3- | tr '\\' '/');;
+        *) echo "drift: cannot launch claude in non-host path: $ANCHOR_WIN"; break;;
+    esac
+
+    (cd "$ANCHOR_UNIX" && claude $CLAUDE_ARGS) || true
+    DRIFT_ARGS="-c"
+done

@@ -48,6 +48,10 @@ A fast, vim-style terminal file browser for Windows.
 | `c` | Claude workspace browser (`l` opens a workspace's sessions, `h` backs out) |
 | `e` | (workspace list) edit the workspace: `Space` toggles folders, `Tab`/`l` focus the list, `Esc`/`c` done |
 | `W` | (browsing) add directory under cursor to a workspace |
+| `Enter` | (session list) resume the session in claude |
+| `n` | new claude session in the workspace |
+
+Run `drift -c` to open straight into the claude workspace browser.
 | `Enter` | Open file in vim |
 | `q` | Quit |
 
