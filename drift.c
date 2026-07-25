@@ -411,6 +411,17 @@ void DrawScreen() {
     int width = info.srWindow.Right - info.srWindow.Left + 1;
     int height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
+    // Focus can only live in the manifest while there is a manifest on screen
+    // with something in it: below THREE_PANE_MIN_WIDTH it is not drawn, and
+    // empty it draws no rows. Either way the file list's selection bar is
+    // suppressed for a cursor that never appears, while j/k still move and
+    // Space still removes members nothing is showing. Cleared here, ahead of
+    // the too-small bail below, because that path draws nothing at all --
+    // and re-checked every frame, so narrowing the window also releases it
+    if (width < THREE_PANE_MIN_WIDTH || member_count == 0) {
+        manifest_focused = false;
+    }
+
     // Window too small to draw the layout safely (header line, rule line, and
     // room for the panes' fixed rows -- see MIN_WINDOW_HEIGHT)
     if (width < MIN_WINDOW_WIDTH || height < MIN_WINDOW_HEIGHT) {
