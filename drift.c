@@ -2877,6 +2877,9 @@ void OpenFileInEditor() {
 
     // The editor may have written new files
     ReloadCurrentDirectory();
+    if (parent_directory[0] != '\0') {
+        LoadParentDirectory();
+    }
 }
 
 void HandleMarkOperation(enum MarkStatus new_status) {
@@ -2959,12 +2962,30 @@ void HandlePaste(int move) {
     FlushConsoleInputBuffer(hIn);
 
     ReloadCurrentDirectory(); // partial work may have happened either way
+    if (parent_directory[0] != '\0') {
+        LoadParentDirectory(); // a move out of the parent leaves it listing ghosts
+    }
 
     // Failure keeps the marks, same as cancelling the delete popup -- the
     // user built that set on purpose. (Windows shows its own error dialog;
     // FOF_NOERRORUI is unset.)
     if (result == 0 && !op.fAnyOperationsAborted) {
         ClearMarkedFiles();
+    } else if (move) {
+        // Keeping the set is right, but a cancelled or partly-failed move
+        // leaves some of it naming files that are already gone. Retrying would
+        // raise a shell error per missing source, and 'd' would open a delete
+        // prompt listing them. Keep what is still there, drop what is not
+        int kept = 0;
+        for (int i = 0; i < marked_files_count; i++) {
+            if (GetFileAttributes(marked_files[i].path) != INVALID_FILE_ATTRIBUTES) {
+                marked_files[kept++] = marked_files[i];
+            }
+        }
+        marked_files_count = kept;
+        if (marked_files_count == 0) {
+            ClearMarkedFiles(); // nothing left -- also drop mark_directory
+        }
     }
 }
 
