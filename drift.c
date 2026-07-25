@@ -227,7 +227,9 @@ bool MarkDirEqualToCurrentDir();
 void ConfirmDelete();
 void DrawDeletePopup(int width, int height, CHAR_INFO* out_buffer);
 void WriteToBuffer(CHAR_INFO* buffer, int width, int row, int col, const char* text, WORD color);
+void WriteToBufferCP(CHAR_INFO* buffer, int width, int row, int col, const char* text, WORD color, UINT cp);
 void AnsiToWide(const char* src, wchar_t* dst, int dst_count);
+void BytesToWide(const char* src, wchar_t* dst, int dst_count, UINT cp);
 char* BuildFromList(size_t* out_size);
 void OpenFileInEditor();
 
@@ -279,6 +281,10 @@ ULONGLONG preview_size;
 bool preview_is_dir;
 bool preview_binary;
 bool preview_unreadable;
+// Which encoding the preview bytes arrived in. Filenames are always the ANSI
+// codepage, but file contents mostly are not, and the frame buffer is UTF-16
+// either way -- so this only decides how the bytes are decoded on the way in
+bool preview_utf8;
 
 char mark_directory[MAX_PATH];
 char parent_directory[MAX_PATH];
@@ -821,10 +827,38 @@ void LoadPreview() {
     preview_binary = memchr(preview_bytes, '\0', preview_len) != NULL;
 
     // Strip a UTF-8 BOM so it doesn't render as garbage
-    if (preview_len >= 3 && (unsigned char)preview_bytes[0] == 0xEF &&
-        (unsigned char)preview_bytes[1] == 0xBB && (unsigned char)preview_bytes[2] == 0xBF) {
+    bool had_bom = preview_len >= 3 && (unsigned char)preview_bytes[0] == 0xEF &&
+                   (unsigned char)preview_bytes[1] == 0xBB &&
+                   (unsigned char)preview_bytes[2] == 0xBF;
+    if (had_bom) {
         memmove(preview_bytes, preview_bytes + 3, preview_len - 3);
         preview_len -= 3;
+    }
+
+    // A BOM is a declaration; otherwise ask whether the bytes are valid UTF-8.
+    // Pure ASCII satisfies both encodings and decodes identically, and real
+    // codepage text essentially never forms valid UTF-8 by accident, so the
+    // test is safe in both directions
+    preview_utf8 = had_bom;
+    if (!preview_utf8 && !preview_binary && preview_len > 0) {
+        // The read stops at PREVIEW_BYTES and can land mid-character, so a
+        // dangling lead byte would condemn the whole file to the wrong
+        // decoder. Ignore a trailing sequence that is merely unfinished
+        int test = preview_len;
+        for (int back = 1; back <= 4 && back <= test; back++) {
+            unsigned char c = (unsigned char)preview_bytes[test - back];
+            if (c < 0x80) break;  // complete on its own
+            if (c >= 0xC0) {      // lead byte: how long should it have been?
+                int need = c >= 0xF0 ? 4 : (c >= 0xE0 ? 3 : 2);
+                if (back < need) test -= back;
+                break;
+            }
+        }
+        // Length passed explicitly: a full read fills preview_bytes exactly,
+        // leaving it without a terminator for -1 to find
+        preview_utf8 = test > 0 &&
+                       MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                           preview_bytes, test, NULL, 0) > 0;
     }
 }
 
@@ -896,7 +930,10 @@ void DrawContextPane(CHAR_INFO* buffer, int width, int height, int divider2) {
                 }
             }
             line[n] = '\0';
-            WriteToBuffer(buffer, width, row, col_start, line, white);
+            // The one call site in the file carrying file bytes rather than a
+            // filename or a literal
+            WriteToBufferCP(buffer, width, row, col_start, line, white,
+                            preview_utf8 ? CP_UTF8 : CP_ACP);
             row++;
             line_start = i + 1;
         }
@@ -4008,23 +4045,39 @@ void Cleanup() {
     CloseHandle(hAlt);
 }
 
-void AnsiToWide(const char* src, wchar_t* dst, int dst_count) {
-    int written = MultiByteToWideChar(CP_ACP, 0, src, -1, dst, dst_count);
+// Deliberately lenient: no MB_ERR_INVALID_CHARS here, so a character clipped
+// by a caller's line buffer decodes to one replacement mark. Failing strictly
+// would return 0 and blank the whole row instead. Strictness belongs in the
+// detection in LoadPreview, not in the render path
+void BytesToWide(const char* src, wchar_t* dst, int dst_count, UINT cp) {
+    int written = MultiByteToWideChar(cp, 0, src, -1, dst, dst_count);
     if (written == 0 && dst_count > 0) {
         dst[0] = L'\0';
     }
 }
 
-void WriteToBuffer(CHAR_INFO* buffer, int width, int row, int col, const char* text, WORD text_color) {
+// Filenames from FindFirstFileA really are in the ANSI codepage
+void AnsiToWide(const char* src, wchar_t* dst, int dst_count) {
+    BytesToWide(src, dst, dst_count, CP_ACP);
+}
+
+void WriteToBufferCP(CHAR_INFO* buffer, int width, int row, int col, const char* text,
+                     WORD text_color, UINT cp) {
     wchar_t wtext[MAX_PATH];
-    AnsiToWide(text, wtext, MAX_PATH);
+    BytesToWide(text, wtext, MAX_PATH, cp);
     int len = (int)wcslen(wtext);
 
+    // wtext is UTF-16 and each cell holds one code unit, so the clip below is
+    // in characters, not bytes -- an accent stops costing two columns
     for (int i = 0; i < len && col + i < width - 1; i++) {
         int index = row * width + col + i;
         buffer[index].Char.UnicodeChar = wtext[i];
         buffer[index].Attributes = text_color;
     }
+}
+
+void WriteToBuffer(CHAR_INFO* buffer, int width, int row, int col, const char* text, WORD text_color) {
+    WriteToBufferCP(buffer, width, row, col, text, text_color, CP_ACP);
 }
 
 void ClearMarkedFiles() {
