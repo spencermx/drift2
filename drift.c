@@ -2283,14 +2283,28 @@ void HandleQuickAdd() {
             char anchor[MAX_PATH];
             if (snprintf(anchor, MAX_PATH, "%s\\%s", root, names[ch - '1']) < MAX_PATH) {
                 LoadMembersFrom(anchor);
-                if (json_block_reason == NULL && FindMember(target) < 0 && member_count < MAX_MEMBERS) {
+                // Every one of these three used to fall through to "Added
+                // to X", so a refusal was indistinguishable from a write
+                const char* refused = NULL;
+                if (json_block_reason != NULL) {
+                    refused = "its settings cannot be edited";
+                } else if (FindMember(target) >= 0) {
+                    refused = "it is already there";
+                } else if (member_count >= MAX_MEMBERS) {
+                    refused = "that workspace is full";
+                } else {
                     strcpy(members[member_count], target);
                     member_count++;
                     SaveMembersTo(anchor);
                 }
-                char msg[96];
-                snprintf(msg, sizeof(msg), "Added to %s", labels[ch - '1']);
-                ShowStatusBanner(msg);
+                char msg[160];
+                if (refused == NULL) {
+                    snprintf(msg, sizeof(msg), "Added to %s", labels[ch - '1']);
+                    ShowStatusBanner(msg);
+                } else {
+                    snprintf(msg, sizeof(msg), "Not added: %s -- press a key", refused);
+                    NotifyAndWait(msg);
+                }
             }
             break;
         }
