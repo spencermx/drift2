@@ -61,6 +61,11 @@ while :; do
         *) echo "drift: cannot launch claude in non-host path: $ANCHOR_WIN"; break;;
     esac
 
+    # $CLAUDE_ARGS is deliberately unquoted -- the word splitting is what turns
+    # "--resume <id>" into two arguments. Globbing is not wanted though, and the
+    # id comes from a filename, so disable pathname expansion around it
+    set -f
     (cd "$ANCHOR_UNIX" && claude $CLAUDE_ARGS) || true
+    set +f
     DRIFT_ARGS="-c"
 done

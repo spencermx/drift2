@@ -13,13 +13,15 @@
 //      Regression for the three heap overflows at drift.c:658, 1955-1956 and
 //      1521-1531 (each confirmed under ASAN before the fix).
 //   2. SaveMembersTo's worst-case array size stays inside `cap`, so the
-//      `n += snprintf(...)` accumulation can never make `cap - n` wrap.
+//      accumulation can never make `cap - n` wrap -- plus AppendFmt, the
+//      clamped replacement for the bare `n += snprintf(...)` idiom.
 //   3. RemoveMemberAt's row-shifting strcpy operates on disjoint memory
 //      (GCC's -fanalyzer reports a false positive here).
 
 #include <assert.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -203,6 +205,49 @@ static void test_save_members_bound(void) {
 }
 
 // ---------------------------------------------------------------------------
+// 2b. AppendFmt clamp
+// ---------------------------------------------------------------------------
+
+// Verbatim from drift.c:AppendFmt.
+static size_t AppendFmt(char* buf, size_t n, size_t cap, const char* fmt, ...) {
+    if (cap == 0 || n >= cap - 1) return n;
+    va_list ap;
+    va_start(ap, fmt);
+    int written = vsnprintf(buf + n, cap - n, fmt, ap);
+    va_end(ap);
+    if (written < 0) return n;
+    return (size_t)written >= cap - n ? cap - 1 : n + (size_t)written;
+}
+
+static void test_append_fmt_clamp(void) {
+    printf("AppendFmt clamp (n can never exceed cap - 1)\n");
+
+    // Deliberately overflow a tiny buffer: the bare "n += snprintf(...)" idiom
+    // would push n past cap here, making the next cap - n wrap.
+    enum { CAP = 16 };
+    char buf[CAP];
+    memset(buf, 0, sizeof(buf));
+
+    size_t n = 0;
+    bool in_bounds = true;
+    for (int i = 0; i < 40; i++) {
+        n = AppendFmt(buf, n, CAP, "0123456789");
+        if (n > CAP - 1) in_bounds = false;
+    }
+    report("40 oversized appends keep n <= cap - 1", in_bounds);
+    report("buffer stays NUL-terminated inside cap", strlen(buf) < CAP);
+
+    // And it still appends correctly when there is room.
+    char ok[64];
+    memset(ok, 0, sizeof(ok));
+    size_t m = 0;
+    m = AppendFmt(ok, m, sizeof(ok), "[");
+    m = AppendFmt(ok, m, sizeof(ok), "\"%s\"", "abc");
+    m = AppendFmt(ok, m, sizeof(ok), "]");
+    report("normal appends produce the expected text", strcmp(ok, "[\"abc\"]") == 0 && m == 7);
+}
+
+// ---------------------------------------------------------------------------
 // 3. RemoveMemberAt strcpy disjointness
 // ---------------------------------------------------------------------------
 
@@ -233,6 +278,8 @@ int main(void) {
     test_row_guards();
     printf("\n");
     test_save_members_bound();
+    printf("\n");
+    test_append_fmt_clamp();
     printf("\n");
     test_remove_member_disjoint();
     printf("\n%s (%d failure%s)\n", failures == 0 ? "PASS" : "FAIL",

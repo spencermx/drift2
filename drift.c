@@ -71,6 +71,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <shellapi.h>
 
 #pragma comment(lib, "shell32.lib")
@@ -166,6 +167,7 @@ void DrawClaudeHelpPane(CHAR_INFO* buffer, int width, int height);
 bool GetWorkspacesRoot(char* out);
 bool FindArraySpan(const char* buf, int* out_start, int* out_end);
 void LoadMembersFrom(const char* anchor);
+size_t AppendFmt(char* buf, size_t n, size_t cap, const char* fmt, ...);
 void SaveMembersTo(const char* anchor);
 int FindMember(const char* path);
 void RemoveMemberAt(int index);
@@ -316,6 +318,11 @@ int main(int argc, char* argv[]) {
 }
 
 void Initialize() {
+    // Keep the process current directory out of the executable search path.
+    // Without this, SearchPath prefers the directory drift was launched from,
+    // so a vim.exe planted there would be picked over the real one
+    SetSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE | BASE_SEARCH_PATH_PERMANENT);
+
     hIn = GetStdHandle(STD_INPUT_HANDLE);
     hOriginal = GetStdHandle(STD_OUTPUT_HANDLE);
 
@@ -360,8 +367,8 @@ void DrawScreen() {
     int width = info.srWindow.Right - info.srWindow.Left + 1;
     int height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
-    // Window too small to draw the layout safely (header line, rule line,
-    // and at least one listing row)
+    // Window too small to draw the layout safely (header line, rule line, and
+    // room for the panes' fixed rows -- see MIN_WINDOW_HEIGHT)
     if (width < MIN_WINDOW_WIDTH || height < MIN_WINDOW_HEIGHT) {
         return;
     }
@@ -1693,6 +1700,21 @@ void LoadMembersFrom(const char* anchor) {
     }
 }
 
+// Bounded append. snprintf returns the length it *would* have written, so the
+// bare "n += snprintf(buf + n, cap - n, ...)" idiom lets n run past cap on
+// truncation -- after which "cap - n" wraps to a huge size_t and the next call
+// writes with no bound at all. The current constants leave ~1KB of headroom so
+// this never triggers today; clamping means raising MAX_MEMBERS can't arm it.
+size_t AppendFmt(char* buf, size_t n, size_t cap, const char* fmt, ...) {
+    if (cap == 0 || n >= cap - 1) return n;
+    va_list ap;
+    va_start(ap, fmt);
+    int written = vsnprintf(buf + n, cap - n, fmt, ap);
+    va_end(ap);
+    if (written < 0) return n;
+    return (size_t)written >= cap - n ? cap - 1 : n + (size_t)written;
+}
+
 void SaveMembersTo(const char* anchor) {
     if (json_too_big) return;
 
@@ -1714,7 +1736,7 @@ void SaveMembersTo(const char* anchor) {
     size_t hdl = host ? strlen(host_drive) : 0;
 
     size_t n = 0;
-    n += snprintf(arr + n, cap - n, "[");
+    n = AppendFmt(arr, n, cap, "[");
     for (int i = 0; i < member_count; i++) {
         char written[MAX_PATH];
         const char* src = members[i];
@@ -1725,15 +1747,15 @@ void SaveMembersTo(const char* anchor) {
             }
             src = written;
         }
-        n += snprintf(arr + n, cap - n, "%s\n      \"", i == 0 ? "" : ",");
+        n = AppendFmt(arr, n, cap, "%s\n      \"", i == 0 ? "" : ",");
         for (const char* p = src; *p != '\0' && n < cap - 8; p++) {
             if (*p == '\\' || *p == '"') arr[n++] = '\\';
             arr[n++] = *p;
         }
         arr[n] = '\0';
-        n += snprintf(arr + n, cap - n, "\"");
+        n = AppendFmt(arr, n, cap, "\"");
     }
-    n += snprintf(arr + n, cap - n, member_count > 0 ? "\n    ]" : "]");
+    n = AppendFmt(arr, n, cap, member_count > 0 ? "\n    ]" : "]");
 
     FILE* f = fopen(file, "rb");
     int len = 0;
@@ -2405,6 +2427,16 @@ void OpenFileInEditor() {
         return; // mangled or over-long name -- could act on the wrong file
     }
 
+    // Resolve vim to an absolute path first. CreateProcess with a NULL
+    // lpApplicationName takes the program from the command line and searches
+    // drift's own directory and the process current directory *before* PATH,
+    // so a planted vim.exe would win; naming the executable outright makes it
+    // search nothing at all. (Initialize's SetSearchPathMode is what stops
+    // SearchPath from preferring the current directory in turn.)
+    char vim_exe[MAX_PATH];
+    DWORD vim_len = SearchPath(NULL, "vim.exe", NULL, MAX_PATH, vim_exe, NULL);
+    bool have_vim = vim_len > 0 && vim_len < MAX_PATH;
+
     char command[MAX_PATH + 16];
     snprintf(command, sizeof(command), "vim \"%s\"", file_path);
 
@@ -2414,12 +2446,12 @@ void OpenFileInEditor() {
     SetConsoleMode(hIn, original_console_mode);
 
     // CreateProcess instead of system(): avoids cmd.exe %VAR% expansion
-    // inside quoted paths, and still searches PATH for vim
+    // inside quoted paths
     STARTUPINFO si = {0};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi;
 
-    if (CreateProcess(NULL, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    if (have_vim && CreateProcess(vim_exe, command, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
         WaitForSingleObject(pi.hProcess, INFINITE);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
