@@ -230,6 +230,7 @@ void WriteToBuffer(CHAR_INFO* buffer, int width, int row, int col, const char* t
 void WriteToBufferCP(CHAR_INFO* buffer, int width, int row, int col, const char* text, WORD color, UINT cp);
 void AnsiToWide(const char* src, wchar_t* dst, int dst_count);
 void BytesToWide(const char* src, wchar_t* dst, int dst_count, UINT cp);
+int Utf8Prefix(const char* s, int cells, int max_bytes);
 char* BuildFromList(size_t* out_size);
 void OpenFileInEditor();
 
@@ -237,7 +238,7 @@ void LoadParentDirectory();
 void LoadCurrentDirectory();
 void ReloadCurrentDirectory();
 void ClearMarkedFiles();
-void DrawCreatePopup(int width, char* input_text, const char* placeholder, CHAR_INFO* out_buffer);
+void DrawCreatePopup(int width, char* input_text, const char* placeholder, CHAR_INFO* out_buffer, UINT cp);
 void ShowStatusBanner(const char* text);
 void HandleCreate();
 void HandleMarkOperation(enum MarkStatus new_status);
@@ -1429,7 +1430,12 @@ void HandleRenameSession() {
     // told apart from an edit, rather than saving the visible prefix over the
     // real title
     char prefill[MAX_PATH];
-    snprintf(prefill, sizeof(prefill), "%.*s", max_len, sel->name);
+    // Cut on a character boundary: a byte-precision "%.*s" would leave a
+    // half-written character at the end, which an edit would then save into
+    // the names file
+    int keep = Utf8Prefix(sel->name, max_len, (int)sizeof(prefill) - 1);
+    memcpy(prefill, sel->name, keep);
+    prefill[keep] = '\0';
     snprintf(name, sizeof(name), "%s", prefill);
     int pos = (int)strlen(name);
     bool cancelled = false;
@@ -1457,7 +1463,7 @@ void HandleRenameSession() {
         int start_col = cur.srWindow.Left + (cur_w - popup_w) / 2;
         int start_row = cur.srWindow.Top + (cur_h - popup_h) / 2;
 
-        DrawCreatePopup(popup_w, name, NULL, popup_buffer);
+        DrawCreatePopup(popup_w, name, NULL, popup_buffer, CP_UTF8);
         COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
         COORD origin = { 0, 0 };
         SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
@@ -1570,7 +1576,7 @@ void HandleRenameWorkspace() {
         int start_col = cur.srWindow.Left + (cur_w - popup_w) / 2;
         int start_row = cur.srWindow.Top + (cur_h - popup_h) / 2;
 
-        DrawCreatePopup(popup_w, name, NULL, popup_buffer);
+        DrawCreatePopup(popup_w, name, NULL, popup_buffer, CP_ACP);
         COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
         COORD origin = { 0, 0 };
         SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
@@ -1658,7 +1664,7 @@ void HandleDeleteSession() {
         popup[r * popup_w + popup_w - 1].Char.UnicodeChar = BOX_VERTICAL;
     }
     WriteToBuffer(popup, popup_w, 1, 2, "Delete session?", red);
-    WriteToBuffer(popup, popup_w, 3, 2, sel->name, white);
+    WriteToBufferCP(popup, popup_w, 3, 2, sel->name, white, CP_UTF8);
     WriteToBuffer(popup, popup_w, 5, 2, "[Y] Yes - Recycle Bin  [N] No", white);
 
     int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
@@ -1828,7 +1834,9 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
         FormatAge(sessions[idx].mtime, age, sizeof(age));
         char row_text[160];
         snprintf(row_text, sizeof(row_text), "%-4s %s", age, sessions[idx].name);
-        AnsiToWide(row_text, wname, MAX_PATH);
+        // The name came out of a .jsonl transcript, which is UTF-8. The age
+        // prefix is ASCII, which both encodings agree on
+        BytesToWide(row_text, wname, MAX_PATH, CP_UTF8);
         int len = (int)wcslen(wname);
         for (int col = 0; col < len && COLUMN_DIVIDER_POSITION + 2 + col < divider2; col++) {
             int index = (i + 2) * width + COLUMN_DIVIDER_POSITION + 2 + col;
@@ -1876,16 +1884,17 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
     // The session's name, wrapped to the pane
     int pane_w = width - 1 - col_start;
     if (pane_w < 8) return;
-    int total = (int)strlen(sel->name);
     int off = 0;
-    while (off < total && row < height) {
+    while (sel->name[off] != '\0' && row < height) {
         char chunk[200];
-        int c = total - off;
-        if (c > pane_w) c = pane_w;
-        if (c > (int)sizeof(chunk) - 1) c = (int)sizeof(chunk) - 1;
+        // Sliced by cells on a character boundary, not by byte offset: this is
+        // UTF-8, so cutting at pane_w bytes would split a character on every
+        // wrapped row and leave each row short of the pane
+        int c = Utf8Prefix(sel->name + off, pane_w, (int)sizeof(chunk) - 1);
+        if (c <= 0) break; // no progress possible -- don't spin
         memcpy(chunk, sel->name + off, c);
         chunk[c] = '\0';
-        WriteToBuffer(buffer, width, row, col_start, chunk, white);
+        WriteToBufferCP(buffer, width, row, col_start, chunk, white, CP_UTF8);
         off += c;
         row++;
     }
@@ -3516,7 +3525,10 @@ void DrawDeletePopup(int width, int height, CHAR_INFO* out_buffer) {
     WriteToBuffer(out_buffer, width, height - 3, 2, "[N] No - Cancel", white);
 }
 
-void DrawCreatePopup(int width, char* input_text, const char* placeholder, CHAR_INFO* out_buffer) {
+// `cp` is the encoding of input_text only: the label and the placeholder are
+// generated here and are always ASCII. Session titles come from a UTF-8
+// transcript, while typed and filesystem-derived names are the ANSI codepage
+void DrawCreatePopup(int width, char* input_text, const char* placeholder, CHAR_INFO* out_buffer, UINT cp) {
     int height = 3;
 
     // Fill background
@@ -3550,7 +3562,7 @@ void DrawCreatePopup(int width, char* input_text, const char* placeholder, CHAR_
     if (input_text[0] == '\0' && placeholder != NULL) {
         WriteToBuffer(out_buffer, width, 1, 8, placeholder, gray);
     } else {
-        WriteToBuffer(out_buffer, width, 1, 8, input_text, white);
+        WriteToBufferCP(out_buffer, width, 1, 8, input_text, white, cp);
     }
 }
 
@@ -3668,7 +3680,7 @@ void HandleCreate() {
         int start_row = cur.srWindow.Top + (cur_h - popup_h) / 2;
 
         // Draw popup
-        DrawCreatePopup(popup_w, name, ph, popup_buffer);
+        DrawCreatePopup(popup_w, name, ph, popup_buffer, CP_ACP);
 
         COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
         COORD origin = { 0, 0 };
@@ -4078,6 +4090,33 @@ void WriteToBufferCP(CHAR_INFO* buffer, int width, int row, int col, const char*
 
 void WriteToBuffer(CHAR_INFO* buffer, int width, int row, int col, const char* text, WORD text_color) {
     WriteToBufferCP(buffer, width, row, col, text, text_color, CP_ACP);
+}
+
+// How many bytes of a UTF-8 string fit in `cells` frame-buffer cells, cutting
+// only on a character boundary. Slicing at a byte offset instead would split a
+// character and make each row narrower than the space it was given. A
+// character outside the BMP becomes a surrogate pair, and each cell holds one
+// UTF-16 code unit, so those cost two cells
+int Utf8Prefix(const char* s, int cells, int max_bytes) {
+    int n = 0;
+    int used = 0;
+    while (s[n] != '\0' && used < cells) {
+        unsigned char b = (unsigned char)s[n];
+        int adv = b >= 0xF0 ? 4 : (b >= 0xE0 ? 3 : (b >= 0xC0 ? 2 : 1));
+        // Truncated or malformed: take only the bytes actually present, so a
+        // stray lead byte still advances rather than looping forever
+        for (int k = 1; k < adv; k++) {
+            if (s[n + k] == '\0') {
+                adv = k;
+                break;
+            }
+        }
+        int cost = adv == 4 ? 2 : 1;
+        if (n + adv > max_bytes || used + cost > cells) break;
+        n += adv;
+        used += cost;
+    }
+    return n;
 }
 
 void ClearMarkedFiles() {

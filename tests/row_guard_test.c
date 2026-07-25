@@ -598,6 +598,63 @@ static void test_utf8_trim(void) {
     report("an empty buffer trims to nothing", utf8_trim(ascii, 0) == 0);
 }
 
+// ---------------------------------------------------------------------------
+// 8. Utf8Prefix -- character-boundary slicing for the session detail pane
+// ---------------------------------------------------------------------------
+
+// Verbatim from drift.c:Utf8Prefix.
+static int Utf8Prefix(const char* s, int cells, int max_bytes) {
+    int n = 0;
+    int used = 0;
+    while (s[n] != '\0' && used < cells) {
+        unsigned char b = (unsigned char)s[n];
+        int adv = b >= 0xF0 ? 4 : (b >= 0xE0 ? 3 : (b >= 0xC0 ? 2 : 1));
+        for (int k = 1; k < adv; k++) {
+            if (s[n + k] == '\0') {
+                adv = k;
+                break;
+            }
+        }
+        int cost = adv == 4 ? 2 : 1;
+        if (n + adv > max_bytes || used + cost > cells) break;
+        n += adv;
+        used += cost;
+    }
+    return n;
+}
+
+static void test_utf8_prefix(void) {
+    printf("Utf8Prefix character-boundary slicing\n");
+
+    report("ASCII slices one byte per cell",
+           Utf8Prefix("abcdef", 3, 99) == 3 && Utf8Prefix("abcdef", 99, 99) == 6);
+
+    // "Caf" + e-acute (C3 A9): 4 characters, 5 bytes
+    const char* cafe = "Caf\xC3\xA9";
+    report("a 2-byte character is taken whole", Utf8Prefix(cafe, 4, 99) == 5);
+    report("a 2-byte character that does not fit is left out",
+           Utf8Prefix(cafe, 3, 99) == 3);
+    report("max_bytes stops before splitting a character",
+           Utf8Prefix(cafe, 99, 4) == 3);
+
+    // Euro sign (E2 82 AC): 1 character, 3 bytes, 1 cell
+    report("a 3-byte character costs one cell",
+           Utf8Prefix("\xE2\x82\xAC", 1, 99) == 3);
+
+    // Grinning face (F0 9F 98 80): 1 character, 4 bytes, a surrogate pair
+    report("a 4-byte character costs two cells",
+           Utf8Prefix("\xF0\x9F\x98\x80", 2, 99) == 4);
+    report("a 4-byte character is refused when only one cell is left",
+           Utf8Prefix("\xF0\x9F\x98\x80", 1, 99) == 0);
+
+    // A lead byte with nothing after it must still advance, or the caller's
+    // wrap loop would never terminate
+    report("a truncated sequence still makes progress",
+           Utf8Prefix("ab\xC3", 99, 99) == 3);
+
+    report("an empty string yields nothing", Utf8Prefix("", 99, 99) == 0);
+}
+
 int main(void) {
     printf("drift regression tests\n\n");
     test_row_guards();
@@ -615,6 +672,8 @@ int main(void) {
     test_is_root_directory();
     printf("\n");
     test_utf8_trim();
+    printf("\n");
+    test_utf8_prefix();
     printf("\n%s (%d failure%s)\n", failures == 0 ? "PASS" : "FAIL",
            failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
