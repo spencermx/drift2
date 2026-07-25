@@ -446,40 +446,57 @@ void DrawScreen() {
             WriteToBuffer(buffer, width, 0, right_col, right_info, white);
         }
 
-        // Path on the left, truncated from the front so the deepest (most
-        // useful) part stays visible. The claude browser announces itself
-        // with a title instead of a filesystem path, in yellow.
-        char claude_title[MAX_PATH + 32];
-        char* header_path;
-        if (claude_mode == CM_WORKSPACES) {
-            snprintf(claude_title, sizeof(claude_title), "Claude Workspaces");
-            header_path = claude_title;
-        } else if (claude_mode == CM_SESSIONS) {
-            snprintf(claude_title, sizeof(claude_title), "Claude Workspaces > %s", claude_workspace_name);
-            header_path = claude_title;
+        // Claude mode announces itself with a "Claude Mode" banner on the
+        // left (yellow) plus a header over the column that holds the list, so
+        // the column's contents are labeled. Ordinary browsing shows the path
+        // on the left, truncated from the front so the deepest (most useful)
+        // part stays visible.
+        if (claude_mode != CM_OFF) {
+            // Banner in the same golden tone as the frame/border lines
+            WriteToBuffer(buffer, width, 0, 0, "Claude Mode", orange);
+            // Header each list column with what it holds. In the workspace
+            // view the second column is the workspace list and the third is a
+            // preview of the highlighted workspace's sessions; in the session
+            // view the second column is the session list. Each label aligns to
+            // where that column's items begin and is skipped if it would run
+            // into the right-hand counter.
+            if (claude_mode == CM_WORKSPACES) {
+                int wcol = COLUMN_DIVIDER_POSITION + 4;
+                if (wcol + (int)strlen("Workspaces") < right_col) {
+                    WriteToBuffer(buffer, width, 0, wcol, "Workspaces", gray);
+                }
+                int scol = divider2 + 2;
+                if (three_pane && scol + (int)strlen("Sessions") < right_col) {
+                    WriteToBuffer(buffer, width, 0, scol, "Sessions", gray);
+                }
+            } else { // CM_SESSIONS
+                int scol = COLUMN_DIVIDER_POSITION + 2;
+                if (scol + (int)strlen("Sessions") < right_col) {
+                    WriteToBuffer(buffer, width, 0, scol, "Sessions", gray);
+                }
+            }
         } else {
-            header_path = current_directory;
+            char* header_path = current_directory;
+            int path_col = 0;
+            if (edit_armed) {
+                char tag[96];
+                snprintf(tag, sizeof(tag), "[editing workspace %s] ", edit_workspace_name);
+                WriteToBuffer(buffer, width, 0, 0, tag, yellow);
+                path_col = (int)strlen(tag);
+            }
+            int path_avail = right_col - 2 - path_col;
+            int path_len = (int)strlen(header_path);
+            char path_display[MAX_PATH + 4];
+            if (path_len <= path_avail) {
+                strcpy(path_display, header_path);
+            } else if (path_avail > 3) {
+                snprintf(path_display, sizeof(path_display), "...%s",
+                         header_path + (path_len - (path_avail - 3)));
+            } else {
+                path_display[0] = '\0';
+            }
+            WriteToBuffer(buffer, width, 0, path_col, path_display, blue);
         }
-        WORD header_color = claude_mode == CM_OFF ? blue : yellow;
-        int path_col = 0;
-        if (claude_mode == CM_OFF && edit_armed) {
-            char tag[96];
-            snprintf(tag, sizeof(tag), "[editing workspace %s] ", edit_workspace_name);
-            WriteToBuffer(buffer, width, 0, 0, tag, yellow);
-            path_col = (int)strlen(tag);
-        }
-        int path_avail = right_col - 2 - path_col;
-        int path_len = (int)strlen(header_path);
-        char path_display[MAX_PATH + 4];
-        if (path_len <= path_avail) {
-            strcpy(path_display, header_path);
-        } else if (path_avail > 3) {
-            snprintf(path_display, sizeof(path_display), "...%s",
-                     header_path + (path_len - (path_avail - 3)));
-        } else {
-            path_display[0] = '\0';
-        }
-        WriteToBuffer(buffer, width, 0, path_col, path_display, header_color);
     }
 
     // Horizontal rule under the header, with a junction where it crosses
@@ -500,9 +517,6 @@ void DrawScreen() {
         int file_index = i;
 
         color = FileColor(&parent_directory_files[file_index]);
-        if (claude_mode != CM_OFF && color == blue) {
-            color = yellow; // claude mode: directories join the claude palette
-        }
 
         AnsiToWide(parent_directory_files[file_index].cFileName, wname, MAX_PATH);
         int len = (int)wcslen(wname);
@@ -535,18 +549,22 @@ void DrawScreen() {
         int file_index = top_row + i;
         bool is_selected = (file_index == selected_row);
 
+        // Folders keep their normal drift color even in claude mode -- the
+        // orange frame and yellow header already signal the mode, so the
+        // list stays as legible as the ordinary browser
         color = FileColor(&current_directory_files[file_index]);
-        if (claude_mode != CM_OFF && color == blue) {
-            color = yellow; // claude mode: directories join the claude palette
-        }
 
         // Only one selection bar is ever on screen -- it lives wherever the
         // focus is, so it vanishes here while the manifest list is focused
         if (is_selected && !manifest_focused) {
-            // Remap the foreground to its dark variant (white becomes black)
-            // and paint the whole pane-width segment as the selection bar
+            // Remap the foreground to its dark variant and paint the whole
+            // pane-width segment as the selection bar. White and yellow are
+            // both too light on the silver bar once dimmed (dark yellow on
+            // silver is barely legible), so collapse them to black instead --
+            // matching the black-on-bar text the session list already uses
             WORD fg = color & (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
-            if (fg == (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE)) {
+            if (fg == (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE) ||
+                fg == (FOREGROUND_RED | FOREGROUND_GREEN)) {
                 fg = 0;
             }
             color = fg | bar_background;
@@ -1263,10 +1281,11 @@ void FormatAge(FILETIME ft, char* out, int out_size) {
 void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, int list_height) {
     wchar_t wname[MAX_PATH];
 
-    // Left pane: workspace list, the open one in white
+    // Left pane: workspace list in the normal drift folder color, the open
+    // one in white so it still stands out
     for (int i = 0; i < list_height && i < current_directory_file_count; i++) {
         WIN32_FIND_DATA* w = &current_directory_files[i];
-        WORD c = strcmp(w->cFileName, claude_workspace_name) == 0 ? white : yellow;
+        WORD c = strcmp(w->cFileName, claude_workspace_name) == 0 ? white : blue;
         if (!IsDirectory(w)) c = gray;
         AnsiToWide(w->cFileName, wname, MAX_PATH);
         int len = (int)wcslen(wname);
