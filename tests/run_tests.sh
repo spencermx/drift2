@@ -1,6 +1,7 @@
 #!/bin/sh
 # Run drift's regression checks. Host-native (macOS/Linux) -- no Wine needed,
 # since the tests cover portable arithmetic rather than the Win32 layer.
+# The Windows/MSVC equivalent is tests\run_tests.bat.
 #
 # Usage: tests/run_tests.sh
 set -e
@@ -10,7 +11,8 @@ CC=${CC:-cc}
 status=0
 
 echo "=== 1/3  source lint: WriteToBuffer row guards ==="
-python3 lint_row_guards.py || status=1
+"$CC" -std=c11 -O1 -Wall -Wextra lint_row_guards.c -o /tmp/drift_lint_row_guards
+/tmp/drift_lint_row_guards ../drift.c || status=1
 echo
 
 echo "=== 2/3  regression tests under AddressSanitizer ==="
