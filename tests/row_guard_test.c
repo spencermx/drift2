@@ -498,6 +498,53 @@ static void test_member_parse_refusals(void) {
     report("a \\u escape refuses the edit", lm_block_reason != NULL);
 }
 
+// ---------------------------------------------------------------------------
+// 6. IsRootDirectory
+// ---------------------------------------------------------------------------
+
+// Verbatim from drift.c:IsRootDirectory.
+static bool IsRootDirectory(char* path) {
+    if (strlen(path) == 3 && path[1] == ':' && path[2] == '\\') {
+        return true;
+    }
+    if (path[0] == '\\' && path[1] == '\\') {
+        const char* share = strchr(path + 2, '\\');
+        if (share == NULL) {
+            return true;
+        }
+        const char* next = strchr(share + 1, '\\');
+        if (next == NULL || next[1] == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void test_is_root_directory(void) {
+    printf("IsRootDirectory\n");
+
+    report("a drive root is a root",
+           IsRootDirectory("C:\\") && IsRootDirectory("d:\\"));
+    report("a directory on a drive is not",
+           !IsRootDirectory("C:\\Users") && !IsRootDirectory("C:\\Users\\me"));
+
+    // Regression: these walked up to "\\server" and then to "\", whose search
+    // pattern resolves against the local drive
+    report("a UNC share root is a root",
+           IsRootDirectory("\\\\server\\share"));
+    report("a UNC share root with a trailing slash is a root",
+           IsRootDirectory("\\\\server\\share\\"));
+    report("a UNC server on its own is a root",
+           IsRootDirectory("\\\\server"));
+    report("a directory inside a UNC share is not",
+           !IsRootDirectory("\\\\server\\share\\sub") &&
+           !IsRootDirectory("\\\\server\\share\\sub\\deeper"));
+
+    // Must not read past the end of a short string
+    report("empty and one-character paths are handled",
+           !IsRootDirectory("") && !IsRootDirectory("\\") && !IsRootDirectory("C"));
+}
+
 int main(void) {
     printf("drift regression tests\n\n");
     test_row_guards();
@@ -511,6 +558,8 @@ int main(void) {
     test_find_array_span();
     printf("\n");
     test_member_parse_refusals();
+    printf("\n");
+    test_is_root_directory();
     printf("\n%s (%d failure%s)\n", failures == 0 ? "PASS" : "FAIL",
            failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
