@@ -2431,6 +2431,15 @@ int HandleInput() {
         // The rest are unmodified verbs; Ctrl and Shift keys fall through to
         // the cursor and marking handlers below
         if (!ctrl && !shift) {
+            // 'p' duplicates a workspace marked here with 'y', which works
+            // because the copy lands in the directory the marks came from.
+            // Marks carried in from an ordinary directory instead paste
+            // unrelated files *into* the workspaces folder -- moving them
+            // outright when the set was cut -- where they would then draw as
+            // workspace rows. Only marks made here can be pasted here
+            if (vk == 'P' && !MarkDirEqualToCurrentDir()) {
+                return 1;
+            }
             if (vk == 'L' || vk == VK_RETURN) {
                 if (current_directory_file_count > 0 &&
                     IsDirectory(&current_directory_files[selected_row])) {
