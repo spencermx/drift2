@@ -3081,6 +3081,14 @@ void JumpToHome() {
 void GetParentDirectory(char* path, char* parent) {
     strcpy(parent, path);
 
+    // Drop a trailing separator first, or strrchr finds that one and hands
+    // back the directory itself as its own parent. Stops above "C:\", which
+    // is a root and keeps its slash
+    size_t len = strlen(parent);
+    while (len > 3 && parent[len - 1] == '\\') {
+        parent[--len] = '\0';
+    }
+
     char* last_slash = strrchr(parent, '\\');
     if (last_slash == NULL) {
         // No slash found, treat as root
@@ -3944,7 +3952,12 @@ bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file, char* out_path)
         out_path[0] = '\0';
         return false;
     }
-    return snprintf(out_path, MAX_PATH, "%s\\%s", current_directory, file->cFileName) < MAX_PATH;
+    // A root already ends in a separator, so adding one gives "C:\\Foo".
+    // Win32 accepts that everywhere, but it is what the header renders
+    size_t len = strlen(current_directory);
+    const char* sep = (len > 0 && current_directory[len - 1] == '\\') ? "" : "\\";
+    return snprintf(out_path, MAX_PATH, "%s%s%s", current_directory, sep,
+                    file->cFileName) < MAX_PATH;
 }
 
 bool IsRootDirectory(char* path) {
