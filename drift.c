@@ -38,19 +38,21 @@
 //              workspace's .claude\settings.json additionalDirectories.
 // - F        : (in the workspace list) browse the workspace's own anchor
 //              directory -- the folder claude runs in, so a CLAUDE.md or
-//              notes placed there apply to the whole workspace. Ordinary
-//              browsing; h at the anchor root (or Esc/c) returns to the list
+//              notes placed there apply to the whole workspace. Every
+//              workspace gets an empty CLAUDE.md to fill in; an existing one
+//              is never rewritten. Ordinary browsing, and h at the anchor
+//              root (or Esc/c) returns to the workspace list
 // - R        : (in the workspace list) rename a workspace's drift display
-//              name (stored in <anchor>\.drift-name); the folder itself is
-//              never renamed, so its sessions stay associated
+//              name (stored in .drift\workspace-names); the folder itself
+//              is never renamed, so its sessions stay associated
 // - Shift+W  : (while browsing) add the directory under the cursor to a
 //              workspace picked from a popup
 // - Enter/L  : (session list) resume the session in claude, anchored in the
 //              workspace; N starts a new session (works from the workspace
 //              list too). claude is spawned via "cmd /c claude" so both a
 //              native exe and the npm .cmd shim resolve.
-// - R / D    : (session list) rename the session's drift display title
-//              (stored in <anchor>\.drift-titles, claude files untouched)
+// - R / D    : (session list) rename the session's drift display name
+//              (stored in .drift\session-names, claude files untouched)
 //              / delete the session transcript (recycle bin, confirmed)
 // Run "drift -c" to start directly in the claude workspace browser.
 //
@@ -122,11 +124,17 @@ enum ClaudeMode {
     CM_SESSIONS    // viewing one workspace's session list
 };
 #define MAX_SESSIONS 256
-#define SESSION_TITLE_LEN 96
+#define SESSION_NAME_LEN 96
+// Drift's own state lives in .drift\ beside workspaces\, never inside an
+// anchor: an anchor is a directory the user opens and writes notes in, and
+// workspaces\ is the list drawn in the workspace column, so a file there
+// would draw as a workspace row. Both are "key <TAB> [key2 <TAB>] name".
+#define WORKSPACE_NAMES_FILE "workspace-names"
+#define SESSION_NAMES_FILE   "session-names"
 typedef struct {
-    char path[MAX_PATH];          // full path to the .jsonl transcript
-    char id[48];                  // session uuid (filename without .jsonl)
-    char title[SESSION_TITLE_LEN]; // first user message excerpt
+    char path[MAX_PATH];         // full path to the .jsonl transcript
+    char id[48];                 // session uuid (filename without .jsonl)
+    char name[SESSION_NAME_LEN]; // renamed, else its first user message
     FILETIME mtime;
 } SessionEntry;
 typedef struct {
@@ -161,14 +169,21 @@ void EnterClaudeMode();
 void ExitClaudeMode();
 void EnterSessionsView();
 void LoadSessionsFor(const char* anchor);
-void ParseSessionTitle(const char* path, char* out, int out_size);
+void ReadSessionName(const char* path, char* out, int out_size);
 int CompareSessions(const void* a, const void* b);
 void FormatAge(FILETIME ft, char* out, int out_size);
 void EncodeProjectPath(const char* path, char* out, bool keep_dots);
 void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, int list_height);
 void DrawClaudeInfoPane(CHAR_INFO* buffer, int width, int height, int divider2);
 void DrawClaudeHelpPane(CHAR_INFO* buffer, int width, int height);
+bool GetDriftDir(char* out);
 bool GetWorkspacesRoot(char* out);
+const char* AnchorFolder(const char* anchor);
+bool GetNameFile(char* out, const char* leaf);
+bool SetNameEntry(const char* leaf, const char* key, const char* name);
+void EnsureNamesMigrated();
+void MigrateLegacyNames();
+void LoadWorkspaceNames();
 bool FindArraySpan(const char* buf, int* out_start, int* out_end);
 void LoadMembersFrom(const char* anchor);
 size_t AppendFmt(char* buf, size_t n, size_t cap, const char* fmt, ...);
@@ -178,14 +193,15 @@ void RemoveMemberAt(int index);
 void ToggleMemberUnderCursor();
 void EnterEditMode();
 void ExitEditMode();
+void EnsureWorkspaceNotes(const char* anchor);
 void EnterAnchorMode();
 void ExitAnchorMode();
 void HandleQuickAdd();
 int LaunchClaudeIn(const char* anchor, const char* session_id);
 void ScrollOriginalScreen();
 bool IsSafeSessionId(const char* id);
-void ApplyTitleOverrides(const char* anchor);
-void SetTitleOverride(const char* anchor, const char* id, const char* title);
+void ApplySessionNames(const char* anchor);
+void SetSessionName(const char* anchor, const char* id, const char* name);
 void WorkspaceDisplayName(const char* folder, char* out, size_t out_size);
 void SetWorkspaceName(const char* folder, const char* display);
 bool WorkspaceNameTaken(const char* name, const char* except_folder);
@@ -311,6 +327,12 @@ char sessions_loaded_for[MAX_PATH]; // cache key for the sessions[] array
 bool anchor_armed = false;
 char anchor_workspace[MAX_PATH];
 char anchor_workspace_name[MAX_PATH];
+
+// WorkspaceDisplayName runs for every drawn row, so the workspace-names file
+// is held in memory rather than reopened per row. Writes drop the flag.
+char workspace_names[32768];
+bool workspace_names_loaded = false;
+bool names_migrated = false;
 
 enum MarkStatus mark_status = MARKED;
 // =========================== Global Variables ==============================
@@ -866,20 +888,75 @@ void FormatSize(ULONGLONG size, char* out, int out_size) {
 // ============================= Context Pane ======================================
 
 // ============================= Claude Workspaces =================================
-bool GetWorkspacesRoot(char* out) {
+// %DRIFT_HOME%|%USERPROFILE%\.drift -- everything drift stores about itself
+bool GetDriftDir(char* out) {
     char home[MAX_PATH];
     DWORD len = GetEnvironmentVariable("DRIFT_HOME", home, MAX_PATH);
     if (len == 0 || len >= MAX_PATH) {
         len = GetEnvironmentVariable("USERPROFILE", home, MAX_PATH);
     }
     if (len == 0 || len >= MAX_PATH) return false;
+    if (snprintf(out, MAX_PATH, "%s\\.drift", home) >= MAX_PATH) return false;
+    CreateDirectory(out, NULL); // ok if it already exists
+    return true;
+}
 
-    char path[MAX_PATH];
-    if (snprintf(path, MAX_PATH, "%s\\.drift", home) >= MAX_PATH) return false;
-    CreateDirectory(path, NULL); // ok if it already exists
-    if (snprintf(out, MAX_PATH, "%s\\.drift\\workspaces", home) >= MAX_PATH) return false;
+bool GetWorkspacesRoot(char* out) {
+    char dir[MAX_PATH];
+    if (!GetDriftDir(dir)) return false;
+    if (snprintf(out, MAX_PATH, "%s\\workspaces", dir) >= MAX_PATH) return false;
     CreateDirectory(out, NULL);
     return true;
+}
+
+// The folder name under workspaces_root. It is the key both name files use --
+// never the display name, which changes, and never the full path, which
+// differs between the Wine wrapper and a native run
+const char* AnchorFolder(const char* anchor) {
+    const char* slash = strrchr(anchor, '\\');
+    return slash != NULL ? slash + 1 : anchor;
+}
+
+bool GetNameFile(char* out, const char* leaf) {
+    char dir[MAX_PATH];
+    if (!GetDriftDir(dir)) return false;
+    return snprintf(out, MAX_PATH, "%s\\%s", dir, leaf) < MAX_PATH;
+}
+
+// Replaces (or, with an empty name, drops) the row under `key`. Streams the
+// old file through a temp copy rather than rewriting from memory, so the file
+// is never bounded by a buffer and a crash can't leave it half written.
+// `key` is one field for workspace names, "folder<TAB>session" for session
+// names; a row matches when the line starts with the key and a tab.
+bool SetNameEntry(const char* leaf, const char* key, const char* name) {
+    char file[MAX_PATH];
+    if (!GetNameFile(file, leaf)) return false;
+    char tmp[MAX_PATH];
+    if (snprintf(tmp, MAX_PATH, "%s.tmp", file) >= MAX_PATH) return false;
+
+    FILE* in = fopen(file, "rb");
+    FILE* out = fopen(tmp, "wb");
+    if (out == NULL) {
+        if (in != NULL) fclose(in);
+        return false;
+    }
+    size_t klen = strlen(key);
+    if (in != NULL) {
+        char line[MAX_PATH + SESSION_NAME_LEN + 64];
+        while (fgets(line, sizeof(line), in) != NULL) {
+            if (_strnicmp(line, key, klen) == 0 && line[klen] == '\t') continue;
+            fputs(line, out);
+        }
+        fclose(in);
+    }
+    if (name[0] != '\0') {
+        fprintf(out, "%s\t%s\n", key, name);
+    }
+    // A write error leaves the original untouched -- the caller can still
+    // find the row where it was, and migration keeps its sidecar
+    bool ok = fclose(out) == 0 && MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
+    workspace_names_loaded = false;
+    return ok;
 }
 
 void EnterClaudeMode() {
@@ -1090,37 +1167,44 @@ void LoadSessionsFor(const char* anchor) {
         // it cannot be resumed, so don't list it (delete it from the browser)
         if (!IsSafeSessionId(s->id)) continue;
         s->mtime = fd.ftLastWriteTime;
-        ParseSessionTitle(s->path, s->title, sizeof(s->title));
+        ReadSessionName(s->path, s->name, sizeof(s->name));
         session_count++;
     } while (FindNextFile(hFind, &fd) && session_count < MAX_SESSIONS);
     FindClose(hFind);
 
     qsort(sessions, session_count, sizeof(SessionEntry), CompareSessions);
-    ApplyTitleOverrides(anchor);
+    ApplySessionNames(anchor);
 }
 
-// Drift-side session titles live in <anchor>\.drift-titles as tab-separated
-// "id<TAB>title" lines -- claude's own files are never modified
-void ApplyTitleOverrides(const char* anchor) {
+// Drift-side session names live in .drift\session-names as tab-separated
+// "folder<TAB>id<TAB>name" lines -- claude's own files are never modified
+void ApplySessionNames(const char* anchor) {
+    EnsureNamesMigrated();
+
     char file[MAX_PATH];
-    if (snprintf(file, MAX_PATH, "%s\\.drift-titles", anchor) >= MAX_PATH) return;
+    if (!GetNameFile(file, SESSION_NAMES_FILE)) return;
     FILE* f = fopen(file, "rb");
     if (f == NULL) return;
 
-    char line[SESSION_TITLE_LEN + 64];
+    const char* folder = AnchorFolder(anchor);
+    size_t flen = strlen(folder);
+
+    char line[MAX_PATH + SESSION_NAME_LEN + 64];
     while (fgets(line, sizeof(line), f) != NULL) {
-        char* tab = strchr(line, '\t');
+        if (_strnicmp(line, folder, flen) != 0 || line[flen] != '\t') continue;
+        char* id = line + flen + 1;
+        char* tab = strchr(id, '\t');
         if (tab == NULL) continue;
         *tab = '\0';
-        char* title = tab + 1;
-        size_t tl = strlen(title);
-        while (tl > 0 && (title[tl - 1] == '\n' || title[tl - 1] == '\r')) {
-            title[--tl] = '\0';
+        char* name = tab + 1;
+        size_t nl = strlen(name);
+        while (nl > 0 && (name[nl - 1] == '\n' || name[nl - 1] == '\r')) {
+            name[--nl] = '\0';
         }
-        if (tl == 0) continue;
+        if (nl == 0) continue;
         for (int i = 0; i < session_count; i++) {
-            if (_stricmp(sessions[i].id, line) == 0) {
-                snprintf(sessions[i].title, SESSION_TITLE_LEN, "%s", title);
+            if (_stricmp(sessions[i].id, id) == 0) {
+                snprintf(sessions[i].name, SESSION_NAME_LEN, "%s", name);
                 break;
             }
         }
@@ -1128,75 +1212,132 @@ void ApplyTitleOverrides(const char* anchor) {
     fclose(f);
 }
 
-// Replaces (or, with an empty title, removes) one id's entry
-void SetTitleOverride(const char* anchor, const char* id, const char* title) {
-    char file[MAX_PATH];
-    if (snprintf(file, MAX_PATH, "%s\\.drift-titles", anchor) >= MAX_PATH) return;
-    char tmp[MAX_PATH];
-    if (snprintf(tmp, MAX_PATH, "%s.tmp", file) >= MAX_PATH) return;
-
-    FILE* in = fopen(file, "rb");
-    FILE* out = fopen(tmp, "wb");
-    if (out == NULL) {
-        if (in != NULL) fclose(in);
-        return;
-    }
-    if (in != NULL) {
-        char line[SESSION_TITLE_LEN + 64];
-        while (fgets(line, sizeof(line), in) != NULL) {
-            char* tab = strchr(line, '\t');
-            if (tab != NULL) {
-                *tab = '\0';
-                bool same = _stricmp(line, id) == 0;
-                *tab = '\t';
-                if (same) continue;
-            }
-            fputs(line, out);
-        }
-        fclose(in);
-    }
-    if (title[0] != '\0') {
-        fprintf(out, "%s\t%s\n", id, title);
-    }
-    fclose(out);
-    MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
+// Replaces (or, with an empty name, drops) one session's name
+void SetSessionName(const char* anchor, const char* id, const char* name) {
+    char key[MAX_PATH];
+    if (snprintf(key, sizeof(key), "%s\t%s", AnchorFolder(anchor), id) >= (int)sizeof(key)) return;
+    SetNameEntry(SESSION_NAMES_FILE, key, name);
 }
 
-// A workspace's shown name: the contents of <anchor>\.drift-name if present,
-// otherwise the folder name itself. The folder is never renamed -- that path
-// is the key Claude files its sessions under, so renaming it would orphan
-// them -- so this display name is a pure drift-side overlay, exactly like the
-// session titles above.
-void WorkspaceDisplayName(const char* folder, char* out, size_t out_size) {
-    snprintf(out, out_size, "%s", folder); // default: the folder name
+void LoadWorkspaceNames() {
+    EnsureNamesMigrated();
+
+    workspace_names[0] = '\0';
+    workspace_names_loaded = true;
+
     char file[MAX_PATH];
-    if (snprintf(file, MAX_PATH, "%s\\%s\\.drift-name", workspaces_root, folder) >= MAX_PATH) return;
+    if (!GetNameFile(file, WORKSPACE_NAMES_FILE)) return;
     FILE* f = fopen(file, "rb");
     if (f == NULL) return;
-    char line[MAX_PATH];
-    if (fgets(line, sizeof(line), f) != NULL) {
-        size_t l = strlen(line);
-        while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r')) line[--l] = '\0';
-        if (l > 0) snprintf(out, out_size, "%s", line);
-    }
+    size_t len = fread(workspace_names, 1, sizeof(workspace_names) - 1, f);
     fclose(f);
+    workspace_names[len] = '\0';
+}
+
+// A workspace's shown name: its row in .drift\workspace-names if it has one,
+// otherwise the folder name itself. The folder is never renamed -- that path
+// is the key Claude files its sessions under, so renaming it would orphan
+// them -- so this name is a pure drift-side overlay, exactly like the session
+// names above.
+void WorkspaceDisplayName(const char* folder, char* out, size_t out_size) {
+    snprintf(out, out_size, "%s", folder); // default: the folder's own name
+    if (!workspace_names_loaded) LoadWorkspaceNames();
+
+    size_t flen = strlen(folder);
+    const char* p = workspace_names;
+    while (*p != '\0') {
+        const char* eol = strchr(p, '\n');
+        size_t len = eol != NULL ? (size_t)(eol - p) : strlen(p);
+        if (_strnicmp(p, folder, flen) == 0 && flen < len && p[flen] == '\t') {
+            const char* name = p + flen + 1;
+            size_t nl = len - flen - 1;
+            while (nl > 0 && name[nl - 1] == '\r') nl--;
+            if (nl > 0) snprintf(out, out_size, "%.*s", (int)nl, name);
+            return;
+        }
+        if (eol == NULL) break;
+        p = eol + 1;
+    }
+}
+
+void EnsureNamesMigrated() {
+    if (names_migrated) return;
+    // Every caller runs inside claude mode, where the root is set. Returning
+    // without arming the flag means a caller that somehow arrives earlier
+    // retries later rather than skipping the migration for the whole run.
+    if (workspaces_root[0] == '\0') return;
+    names_migrated = true;
+    MigrateLegacyNames();
+}
+
+// Workspaces created before the name files kept their names inside the anchor
+// (.drift-name, .drift-titles). Fold those into .drift\ once and delete them,
+// so an anchor holds nothing of drift's -- just .claude\ and the user's own
+// notes. Only removes a sidecar after its contents have been written across.
+void MigrateLegacyNames() {
+    char pattern[MAX_PATH];
+    if (snprintf(pattern, MAX_PATH, "%s\\*", workspaces_root) >= MAX_PATH) return;
+    WIN32_FIND_DATA fd;
+    HANDLE h = FindFirstFile(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+
+        char file[MAX_PATH];
+        if (snprintf(file, MAX_PATH, "%s\\%s\\.drift-name",
+                     workspaces_root, fd.cFileName) < MAX_PATH) {
+            FILE* f = fopen(file, "rb");
+            if (f != NULL) {
+                char line[MAX_PATH];
+                bool got = fgets(line, sizeof(line), f) != NULL;
+                fclose(f);
+                bool carried = true;
+                if (got) {
+                    size_t l = strlen(line);
+                    while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r')) {
+                        line[--l] = '\0';
+                    }
+                    if (l > 0) carried = SetNameEntry(WORKSPACE_NAMES_FILE, fd.cFileName, line);
+                }
+                if (carried) DeleteFile(file);
+            }
+        }
+
+        if (snprintf(file, MAX_PATH, "%s\\%s\\.drift-titles",
+                     workspaces_root, fd.cFileName) < MAX_PATH) {
+            FILE* f = fopen(file, "rb");
+            if (f != NULL) {
+                char line[SESSION_NAME_LEN + 64];
+                bool carried = true;
+                while (fgets(line, sizeof(line), f) != NULL) {
+                    char* tab = strchr(line, '\t');
+                    if (tab == NULL) continue;
+                    *tab = '\0';
+                    char* name = tab + 1;
+                    size_t l = strlen(name);
+                    while (l > 0 && (name[l - 1] == '\n' || name[l - 1] == '\r')) {
+                        name[--l] = '\0';
+                    }
+                    if (l == 0) continue;
+                    char key[MAX_PATH];
+                    if (snprintf(key, sizeof(key), "%s\t%s", fd.cFileName, line)
+                            < (int)sizeof(key)) {
+                        if (!SetNameEntry(SESSION_NAMES_FILE, key, name)) carried = false;
+                    }
+                }
+                fclose(f);
+                if (carried) DeleteFile(file);
+            }
+        }
+    } while (FindNextFile(h, &fd));
+    FindClose(h);
 }
 
 // Store (or, with an empty name, clear) a workspace's display-name overlay
 void SetWorkspaceName(const char* folder, const char* display) {
-    char file[MAX_PATH];
-    if (snprintf(file, MAX_PATH, "%s\\%s\\.drift-name", workspaces_root, folder) >= MAX_PATH) return;
-    if (display[0] == '\0') {
-        DeleteFile(file); // revert to the folder name
-        return;
-    }
-    char tmp[MAX_PATH];
-    if (snprintf(tmp, MAX_PATH, "%s.tmp", file) >= MAX_PATH) return;
-    FILE* f = fopen(tmp, "wb");
-    if (f == NULL) return;
-    fprintf(f, "%s\n", display);
-    fclose(f);
-    MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
+    // An empty name drops the row, reverting to the folder name
+    SetNameEntry(WORKSPACE_NAMES_FILE, folder, display);
 }
 
 // True if some workspace other than except_folder already presents `name` as
@@ -1264,7 +1405,7 @@ void HandleRenameSession() {
 
     char name[MAX_PATH];
     int max_len = popup_w - 10;
-    snprintf(name, sizeof(name), "%.*s", max_len, sel->title);
+    snprintf(name, sizeof(name), "%.*s", max_len, sel->name);
     int pos = (int)strlen(name);
     bool cancelled = false;
 
@@ -1310,18 +1451,18 @@ void HandleRenameSession() {
     SetConsoleCursorInfo(hAlt, &cursor_info);
     if (cancelled) return;
 
-    SetTitleOverride(claude_workspace, sel->id, name);
+    SetSessionName(claude_workspace, sel->id, name);
     if (name[0] != '\0') {
-        snprintf(sel->title, sizeof(sel->title), "%s", name);
+        snprintf(sel->name, sizeof(sel->name), "%s", name);
     } else {
-        ParseSessionTitle(sel->path, sel->title, sizeof(sel->title));
+        ReadSessionName(sel->path, sel->name, sizeof(sel->name));
     }
 }
 
 // 'r' in the workspace list: edit the workspace's display name in the same
 // popup, pre-filled with the current name. Enter on an emptied field (or the
 // folder's own name) clears the overlay and reverts to the folder name. Only
-// the .drift-name sidecar changes -- the folder and its sessions are untouched.
+// the .driftworkspace-names row changes -- the folder and its sessions are not.
 void HandleRenameWorkspace() {
     if (current_directory_file_count == 0) return;
     WIN32_FIND_DATA* sel = &current_directory_files[selected_row];
@@ -1441,7 +1582,7 @@ void HandleDeleteSession() {
         popup[r * popup_w + popup_w - 1].Char.UnicodeChar = BOX_VERTICAL;
     }
     WriteToBuffer(popup, popup_w, 1, 2, "Delete session?", red);
-    WriteToBuffer(popup, popup_w, 3, 2, sel->title, white);
+    WriteToBuffer(popup, popup_w, 3, 2, sel->name, white);
     WriteToBuffer(popup, popup_w, 5, 2, "[Y] Yes - Recycle Bin  [N] No", white);
 
     int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
@@ -1472,7 +1613,7 @@ void HandleDeleteSession() {
                 op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_WANTNUKEWARNING;
 
                 if (SHFileOperation(&op) == 0 && !op.fAnyOperationsAborted) {
-                    SetTitleOverride(claude_workspace, sel->id, ""); // drop stale title
+                    SetSessionName(claude_workspace, sel->id, ""); // drop the stale name
                 }
                 FlushConsoleInputBuffer(hIn);
 
@@ -1496,8 +1637,8 @@ int CompareSessions(const void* a, const void* b) {
 
 // Shallow, read-only scan of a transcript for the first real user message.
 // The format is undocumented; on any surprise the title just stays generic.
-void ParseSessionTitle(const char* path, char* out, int out_size) {
-    snprintf(out, out_size, "(untitled)");
+void ReadSessionName(const char* path, char* out, int out_size) {
+    snprintf(out, out_size, "(unnamed)");
 
     FILE* f = fopen(path, "rb");
     if (f == NULL) return;
@@ -1541,7 +1682,7 @@ void ParseSessionTitle(const char* path, char* out, int out_size) {
                     fclose(f);
                     return;
                 }
-                snprintf(out, out_size, "(untitled)");
+                snprintf(out, out_size, "(unnamed)");
             }
         }
 
@@ -1610,7 +1751,7 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
         char age[16];
         FormatAge(sessions[idx].mtime, age, sizeof(age));
         char row_text[160];
-        snprintf(row_text, sizeof(row_text), "%-4s %s", age, sessions[idx].title);
+        snprintf(row_text, sizeof(row_text), "%-4s %s", age, sessions[idx].name);
         AnsiToWide(row_text, wname, MAX_PATH);
         int len = (int)wcslen(wname);
         for (int col = 0; col < len && COLUMN_DIVIDER_POSITION + 2 + col < divider2; col++) {
@@ -1645,7 +1786,7 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
     // First prompt, wrapped to the pane
     int pane_w = width - 1 - col_start;
     if (pane_w < 8) return;
-    int total = (int)strlen(sel->title);
+    int total = (int)strlen(sel->name);
     int off = 0;
     int row = 8;
     while (off < total && row < height) {
@@ -1653,7 +1794,7 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
         int c = total - off;
         if (c > pane_w) c = pane_w;
         if (c > (int)sizeof(chunk) - 1) c = (int)sizeof(chunk) - 1;
-        memcpy(chunk, sel->title + off, c);
+        memcpy(chunk, sel->name + off, c);
         chunk[c] = '\0';
         WriteToBuffer(buffer, width, row, col_start, chunk, white);
         off += c;
@@ -1942,6 +2083,23 @@ void ExitEditMode() {
     claude_mode = CM_WORKSPACES;
 }
 
+// Every workspace gets a CLAUDE.md. Claude runs with the anchor as its working
+// directory, so this file is the workspace's own project memory -- notes here
+// reach every folder in the workspace at once, while each member folder can
+// still carry its own. Created empty on purpose: it belongs to the user, who
+// knows what a CLAUDE.md is for, and template text in a file drift will never
+// rewrite would just be noise every session pays for. CREATE_NEW means an
+// existing file is left exactly as it is.
+void EnsureWorkspaceNotes(const char* anchor) {
+    char file[MAX_PATH];
+    if (snprintf(file, MAX_PATH, "%s\\CLAUDE.md", anchor) >= MAX_PATH) return;
+    HANDLE h = CreateFile(file, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                          FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        CloseHandle(h);
+    }
+}
+
 // 'f' on the workspace list: browse the workspace's own anchor directory.
 // The anchor is a real folder that nothing previously led to, yet it is where
 // a workspace's own notes belong -- claude runs with the anchor as its working
@@ -1959,12 +2117,17 @@ void EnterAnchorMode() {
     if (snprintf(anchor_workspace, MAX_PATH, "%s\\%s", workspaces_root, name) >= MAX_PATH) return;
     WorkspaceDisplayName(name, anchor_workspace_name, MAX_PATH);
 
+    // Workspaces made before this existed have no CLAUDE.md; opening their
+    // files is the natural moment to give them one
+    EnsureWorkspaceNotes(anchor_workspace);
+
     anchor_armed = true;
     claude_mode = CM_OFF;
     ChangeCurrentDirectory(anchor_workspace);
 
     // Land on CLAUDE.md -- the file this mode exists for, one Enter from the
-    // editor. Harmless when the workspace has none yet.
+    // editor
+
     for (int i = 0; i < current_directory_file_count; i++) {
         if (_stricmp(current_directory_files[i].cFileName, "CLAUDE.md") == 0) {
             selected_row = i;
@@ -2128,7 +2291,7 @@ void DrawClaudeInfoPane(CHAR_INFO* buffer, int width, int height, int divider2) 
         char age[16];
         FormatAge(sessions[i].mtime, age, sizeof(age));
         char row_text[160];
-        snprintf(row_text, sizeof(row_text), "%-4s %s", age, sessions[i].title);
+        snprintf(row_text, sizeof(row_text), "%-4s %s", age, sessions[i].name);
         WriteToBuffer(buffer, width, 4 + i, col, row_text, white);
     }
 
@@ -3223,7 +3386,7 @@ void HandleCreate() {
         // an opaque, always-unique timestamp id, so naming never touches the
         // path Claude keys its sessions under, and the shown-name namespace is
         // the only one the user deals with. Accepting the greyed default leaves
-        // the workspace "untitled" -- it just shows its timestamp id.
+        // the workspace unnamed -- it just shows its timestamp id.
         bool custom = strcmp(name, placeholder) != 0;
         if (custom && WorkspaceNameTaken(name, NULL)) {
             NotifyNameTaken(name);
@@ -3243,6 +3406,7 @@ void HandleCreate() {
         char anchor[MAX_PATH];
         if (snprintf(anchor, MAX_PATH, "%s\\%s", workspaces_root, id) >= MAX_PATH) return;
         if (!CreateDirectory(anchor, NULL)) return;
+        EnsureWorkspaceNotes(anchor);
         if (custom) SetWorkspaceName(id, name); // else it shows the id itself
         ReloadCurrentDirectory();
         for (int i = 0; i < current_directory_file_count; i++) {
