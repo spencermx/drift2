@@ -2492,6 +2492,13 @@ int HandleInput() {
     if (!ReadConsoleInput(hIn, &input, 1, &events)) {
         return 0; // Console input unavailable (e.g. redirected stdin) -- exit
     }
+    // Documented to block until a record is available, so this should not
+    // happen. Guarded only here, of the nine read sites: everywhere else an
+    // uninitialised record is one ignored loop iteration, while here it would
+    // be dispatched as whatever command the stack happened to hold
+    if (events == 0) {
+        return 1;
+    }
 
     if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) {
         return 1; // Ignore non-key events (window resize lands here and triggers a redraw)
@@ -2500,9 +2507,15 @@ int HandleInput() {
     BOOL ctrl = input.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
     BOOL shift= input.Event.KeyEvent.dwControlKeyState & SHIFT_PRESSED;
 
+    // Consumed once here for every key, rather than in each branch that
+    // happens to remember. The mode blocks below return early without
+    // clearing it, so a 'g' pressed in the workspace list used to survive an
+    // intervening verb and pair with the next 'g' as though it were "gg"
+    bool was_g = pending_g;
+    pending_g = false;
+
     // Session list has its own small keymap; everything else is inert there
     if (claude_mode == CM_SESSIONS) {
-        pending_g = false;
         WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
         // This view binds no Ctrl chords, but it tested the key code alone, so
         // the ones bound elsewhere landed on whatever shared the letter:
@@ -2607,7 +2620,6 @@ int HandleInput() {
     if (edit_armed && claude_mode == CM_OFF) {
         WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
         if (manifest_focused) {
-            pending_g = false;
             if (vk == 'Q') return 0;
             if (vk == 'J' && manifest_selected < member_count - 1) manifest_selected++;
             else if (vk == 'K' && manifest_selected > 0) manifest_selected--;
@@ -2678,7 +2690,6 @@ int HandleInput() {
     }
 
     if (shift) {
-        pending_g = false;
         if (input.Event.KeyEvent.wVirtualKeyCode == 'G') {
             // Jump to bottom: any magnitude >= file count clamps to the last row
             ModifySelectedRow(current_directory_file_count);
@@ -2691,7 +2702,6 @@ int HandleInput() {
         }
     }
     else if (ctrl) {
-        pending_g = false;
 
         int half_page = GetVisibleRows() / 2;
         if (half_page < 1) half_page = 1;
@@ -2730,9 +2740,6 @@ int HandleInput() {
         }
     }
     else {
-        bool was_g = pending_g;
-        pending_g = false;
-
         switch (input.Event.KeyEvent.wVirtualKeyCode) {
             case 'A': {
                 HandleCreate();
@@ -2791,8 +2798,12 @@ int HandleInput() {
             case 'D': {
                 if (current_directory_file_count == 0) break;
 
+                // marked_files_count == 0 matches HandleMarkOperation: after a
+                // Ctrl+A in which every entry was rejected by GetFilePath,
+                // mark_directory is set but the set is empty, and without this
+                // 'd' took the "marks exist here" path and did nothing at all
                 if (!IsMarkDirectorySet() || !MarkDirEqualToCurrentDir() ||
-                    implicit_mark) {
+                    marked_files_count == 0 || implicit_mark) {
                     ClearMarkedFiles();
                     strcpy(mark_directory, current_directory);
                     ToggleMark();
