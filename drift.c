@@ -3541,13 +3541,36 @@ void HandleCreate() {
         return; // would truncate -- could create or collide at the wrong path
     }
 
+    BOOL created;
+    DWORD err = 0;
     if (is_directory) {
-        CreateDirectory(full_path, NULL);
+        created = CreateDirectory(full_path, NULL);
+        if (!created) err = GetLastError();
     } else {
         HANDLE h = CreateFile(full_path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (h != INVALID_HANDLE_VALUE) {
+        created = h != INVALID_HANDLE_VALUE;
+        if (created) {
             CloseHandle(h);
+        } else {
+            err = GetLastError();
         }
+    }
+
+    // A reserved device name -- CON, NUL, COM1, and the same with any
+    // extension -- opens successfully and leaves nothing on disk, so the call
+    // reporting success is not proof that anything was created
+    if (created && GetFileAttributes(full_path) == INVALID_FILE_ATTRIBUTES) {
+        created = FALSE;
+        err = 0;
+    }
+
+    if (!created) {
+        // Silence here read as "the key did nothing": nothing appears, and the
+        // cursor hunt below finds no match either
+        NotifyAndWait(err == ERROR_ALREADY_EXISTS || err == ERROR_FILE_EXISTS
+                          ? "That name already exists -- press a key"
+                          : "Could not create that item -- press a key");
+        return;
     }
 
     ReloadCurrentDirectory();
