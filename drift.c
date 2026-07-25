@@ -332,7 +332,11 @@ char anchor_workspace_name[MAX_PATH];
 
 // WorkspaceDisplayName runs for every drawn row, so the workspace-names file
 // is held in memory rather than reopened per row. Writes drop the flag.
-char workspace_names[32768];
+// Sized to the file rather than fixed: a read cut short at a fixed cap hid
+// every row past it, so those workspaces fell back to their raw folder ids
+// and WorkspaceNameTaken -- which resolves through WorkspaceDisplayName --
+// stopped seeing their names and let duplicates through
+char* workspace_names = NULL;
 bool workspace_names_loaded = false;
 
 enum MarkStatus mark_status = MARKED;
@@ -1243,16 +1247,35 @@ void SetSessionName(const char* anchor, const char* id, const char* name) {
 }
 
 void LoadWorkspaceNames() {
-    workspace_names[0] = '\0';
+    free(workspace_names);
+    workspace_names = NULL;
     workspace_names_loaded = true;
 
     char file[MAX_PATH];
     if (!GetNameFile(file, WORKSPACE_NAMES_FILE)) return;
     FILE* f = fopen(file, "rb");
     if (f == NULL) return;
-    size_t len = fread(workspace_names, 1, sizeof(workspace_names) - 1, f);
+
+    // Measure first, so the whole file is read however long it has grown
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return;
+    }
+    long size = ftell(f);
+    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return;
+    }
+
+    char* buf = (char*)malloc((size_t)size + 1);
+    if (buf == NULL) {
+        fclose(f); // names fall back to folder ids rather than being wrong
+        return;
+    }
+    size_t len = fread(buf, 1, (size_t)size, f);
     fclose(f);
-    workspace_names[len] = '\0';
+    buf[len] = '\0';
+    workspace_names = buf;
 }
 
 // A workspace's shown name: its row in .drift\workspace-names if it has one,
@@ -1263,6 +1286,7 @@ void LoadWorkspaceNames() {
 void WorkspaceDisplayName(const char* folder, char* out, size_t out_size) {
     snprintf(out, out_size, "%s", folder); // default: the folder's own name
     if (!workspace_names_loaded) LoadWorkspaceNames();
+    if (workspace_names == NULL) return; // no overlay file, or it could not be read
 
     size_t flen = strlen(folder);
     const char* p = workspace_names;
