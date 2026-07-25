@@ -46,7 +46,8 @@ A fast, vim-style terminal file browser for Windows.
 | `a` | Create new file (or directory if name ends with `\`) |
 | `.` | Toggle hidden files (hidden by default) |
 | `c` | Claude workspace browser (`l` opens a workspace's sessions, `h` backs out) |
-| `e` | (workspace list) edit the workspace: `Space` toggles folders, `Tab`/`l` focus the list, `Esc`/`c` done |
+| `e` | (workspace list) edit the workspace's folders: `Space` adds/removes, `Tab`/`l` focus the list, `Esc`/`c` done |
+| `f` | (workspace list) browse the workspace's own files — its `CLAUDE.md` and notes, which apply across every folder in the workspace |
 | `W` | (browsing) add directory under cursor to a workspace |
 | `Enter` | (session list) resume the session in claude |
 | `n` | new claude session in the workspace |

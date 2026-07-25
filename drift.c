@@ -36,6 +36,10 @@
 //              Tab focuses that list (x removes, Enter jumps the browser
 //              there), Esc finishes. Folder membership is written to the
 //              workspace's .claude\settings.json additionalDirectories.
+// - F        : (in the workspace list) browse the workspace's own anchor
+//              directory -- the folder claude runs in, so a CLAUDE.md or
+//              notes placed there apply to the whole workspace. Ordinary
+//              browsing; h at the anchor root (or Esc/c) returns to the list
 // - R        : (in the workspace list) rename a workspace's drift display
 //              name (stored in <anchor>\.drift-name); the folder itself is
 //              never renamed, so its sessions stay associated
@@ -174,6 +178,8 @@ void RemoveMemberAt(int index);
 void ToggleMemberUnderCursor();
 void EnterEditMode();
 void ExitEditMode();
+void EnterAnchorMode();
+void ExitAnchorMode();
 void HandleQuickAdd();
 int LaunchClaudeIn(const char* anchor, const char* session_id);
 void ScrollOriginalScreen();
@@ -298,6 +304,13 @@ int manifest_top = 0;
 char json_buf[65536];
 bool json_too_big = false; // refuse edits rather than corrupt a huge file
 char sessions_loaded_for[MAX_PATH]; // cache key for the sessions[] array
+
+// Browsing a workspace's own anchor directory. Ordinary file browsing pinned
+// inside one anchor, so the workspace's CLAUDE.md and notes are reachable
+// without knowing (or being able to type) the timestamp path
+bool anchor_armed = false;
+char anchor_workspace[MAX_PATH];
+char anchor_workspace_name[MAX_PATH];
 
 enum MarkStatus mark_status = MARKED;
 // =========================== Global Variables ==============================
@@ -509,9 +522,18 @@ void DrawScreen() {
         } else {
             char* header_path = current_directory;
             int path_col = 0;
+            // Both armed modes browse ordinary directories, so the header
+            // names the workspace they belong to -- an anchor's folder is an
+            // opaque timestamp, and nothing else on screen would say which
+            // workspace these files are
+            char tag[96];
+            tag[0] = '\0';
             if (edit_armed) {
-                char tag[96];
                 snprintf(tag, sizeof(tag), "[editing workspace %s] ", edit_workspace_name);
+            } else if (anchor_armed) {
+                snprintf(tag, sizeof(tag), "[workspace %s] ", anchor_workspace_name);
+            }
+            if (tag[0] != '\0') {
                 WriteToBuffer(buffer, width, 0, 0, tag, yellow);
                 path_col = (int)strlen(tag);
             }
@@ -534,7 +556,7 @@ void DrawScreen() {
     // the column divider
     // Frame follows the mode: blue for files, claude-orange in claude mode
     // and while a workspace edit is armed
-    WORD frame_color = (claude_mode == CM_OFF && !edit_armed) ? blue : orange;
+    WORD frame_color = (claude_mode == CM_OFF && !edit_armed && !anchor_armed) ? blue : orange;
     for (int col = 0; col < width; col++) {
         int index = width + col;
         bool junction = col == COLUMN_DIVIDER_POSITION || (three_pane && col == divider2);
@@ -1920,10 +1942,49 @@ void ExitEditMode() {
     claude_mode = CM_WORKSPACES;
 }
 
+// 'f' on the workspace list: browse the workspace's own anchor directory.
+// The anchor is a real folder that nothing previously led to, yet it is where
+// a workspace's own notes belong -- claude runs with the anchor as its working
+// directory, so a CLAUDE.md there is the workspace's project memory, covering
+// every member folder at once. Its name is an opaque timestamp, so reaching it
+// by typing a path is not realistic; this is the way in.
+//
+// The mode is the ordinary file browser, unrestricted -- only the exits are
+// rerouted (see HandleInput), so the browse cannot wander out of the anchor
+// while the header still claims to be showing a workspace.
+void EnterAnchorMode() {
+    if (current_directory_file_count == 0) return;
+    if (!IsDirectory(&current_directory_files[selected_row])) return;
+    char* name = current_directory_files[selected_row].cFileName;
+    if (snprintf(anchor_workspace, MAX_PATH, "%s\\%s", workspaces_root, name) >= MAX_PATH) return;
+    WorkspaceDisplayName(name, anchor_workspace_name, MAX_PATH);
+
+    anchor_armed = true;
+    claude_mode = CM_OFF;
+    ChangeCurrentDirectory(anchor_workspace);
+
+    // Land on CLAUDE.md -- the file this mode exists for, one Enter from the
+    // editor. Harmless when the workspace has none yet.
+    for (int i = 0; i < current_directory_file_count; i++) {
+        if (_stricmp(current_directory_files[i].cFileName, "CLAUDE.md") == 0) {
+            selected_row = i;
+            break;
+        }
+    }
+}
+
+void ExitAnchorMode() {
+    anchor_armed = false;
+    ChangeCurrentDirectory(workspaces_root);
+    claude_mode = CM_WORKSPACES;
+}
+
 // Shift+W while browsing: add the directory under the cursor to a workspace
 // picked from a small popup, without entering claude mode at all
 void HandleQuickAdd() {
-    if (claude_mode != CM_OFF || edit_armed) return;
+    // Inert inside an anchor browse too -- the only directory there is
+    // .claude, and adding it as a member folder is never what was meant
+    if (claude_mode != CM_OFF || edit_armed || anchor_armed) return;
     if (current_directory_file_count == 0) return;
     if (!IsDirectory(&current_directory_files[selected_row])) return;
     char target[MAX_PATH];
@@ -2029,6 +2090,7 @@ void DrawClaudeHelpPane(CHAR_INFO* buffer, int width, int height) {
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "l    open sessions", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "n    new session", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "e    edit workspace", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "f    workspace files", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "a    new workspace", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "r    rename", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "y/p  duplicate", gray);
@@ -2090,7 +2152,9 @@ void DrawManifestPane(CHAR_INFO* buffer, int width, int height, int divider2) {
         if (row < height) WriteToBuffer(buffer, width, row++, col, "x      remove folder", gray);
         if (row < height) WriteToBuffer(buffer, width, row++, col, "Enter  jump to folder", gray);
     } else {
-        if (row < height) WriteToBuffer(buffer, width, row++, col, "Space  toggle folder", gray);
+        // "add/remove" without a trailing noun: this pane is 23 columns wide
+        // on an 80-column window, which is the default console size
+        if (row < height) WriteToBuffer(buffer, width, row++, col, "Space  add/remove", gray);
         if (row < height) WriteToBuffer(buffer, width, row++, col, "Tab    focus this list", gray);
         if (row < height) WriteToBuffer(buffer, width, row++, col, "Esc    done", gray);
     }
@@ -2208,6 +2272,10 @@ int HandleInput() {
             EnterEditMode();
             return 1;
         }
+        if (vk == 'F') {
+            EnterAnchorMode();
+            return 1;
+        }
         if (vk == 'R') {
             HandleRenameWorkspace();
             return 1;
@@ -2276,6 +2344,31 @@ int HandleInput() {
             }
             if (vk == 'Y' || vk == 'X' || vk == 'P' || vk == 'D') {
                 return 1; // file operations are suspended while editing
+            }
+        }
+    }
+
+    // Browsing a workspace's anchor: every file verb stays live (it is a real
+    // directory and drift is a file manager), but the ways *out* are rerouted
+    // so the browse stays inside the workspace named in the header
+    if (anchor_armed && claude_mode == CM_OFF) {
+        WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+        // '`'/'~' and the history popup teleport by absolute path -- they
+        // would leave the anchor with the mode still armed
+        if (vk == VK_OEM_3 || vk == 'O') {
+            return 1;
+        }
+        if (!ctrl && !shift) {
+            if (vk == VK_ESCAPE || vk == 'C' || vk == VK_BACK) {
+                ExitAnchorMode();
+                return 1;
+            }
+            // 'h' walks up as usual inside the anchor; at its root "up" is
+            // the workspace list, not the raw workspaces folder full of
+            // timestamp names
+            if (vk == 'H' && _stricmp(current_directory, anchor_workspace) == 0) {
+                ExitAnchorMode();
+                return 1;
             }
         }
     }
@@ -3372,9 +3465,10 @@ void Cleanup() {
         // the user was browsing. Quitting straight from the workspace/session
         // view never unwinds it (ExitClaudeMode does, on H/C/Esc), so persist
         // the saved return directory instead -- otherwise the cd-on-quit
-        // wrapper strands the shell in .drift\workspaces
-        const char* final_dir = (claude_mode != CM_OFF) ? claude_return_dir
-                                                         : current_directory;
+        // wrapper strands the shell in .drift\workspaces. Same for an anchor
+        // browse, which is deeper still and nowhere the user wants to land
+        const char* final_dir = (claude_mode != CM_OFF || anchor_armed) ? claude_return_dir
+                                                                       : current_directory;
 
         FILE* f = fopen(temp_path, "w");
         if (f) {
