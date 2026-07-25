@@ -384,6 +384,120 @@ static void test_find_array_span(void) {
            strcmp(got, "[\"a]b\",\"c\"]") == 0);
 }
 
+// ---------------------------------------------------------------------------
+// 5. LoadMembersFrom refuses lossy edits
+// ---------------------------------------------------------------------------
+
+static char lm_members[MAX_MEMBERS][MAX_PATH];
+static int lm_member_count;
+static const char* lm_block_reason;
+
+// The member-parsing half of drift.c:LoadMembersFrom, verbatim apart from
+// taking the document as a string rather than reading it from a file. The
+// host-drive rewrite is omitted; it does not touch any of these paths.
+static void parse_members(const char* json) {
+    lm_member_count = 0;
+    lm_block_reason = NULL;
+
+    int s, e;
+    if (!FindArraySpan(json, &s, &e)) return;
+    const char* p = json + s + 1;
+    const char* stop = json + e;
+    while (p < stop && lm_member_count < MAX_MEMBERS) {
+        if (*p != '"') {
+            p++;
+            continue;
+        }
+        p++;
+        char* out = lm_members[lm_member_count];
+        int n = 0;
+        while (p < stop && *p != '"' && n < MAX_PATH - 1) {
+            if (*p == '\\' && p + 1 < stop) {
+                p++;
+                if (*p == 'u') {
+                    lm_block_reason = "(unsupported \\u escape in settings)";
+                    out[n++] = '?';
+                    p++;
+                    for (int k = 0; k < 4 && p < stop; k++) p++;
+                    continue;
+                }
+                out[n++] = *p++;
+            } else {
+                out[n++] = *p++;
+            }
+        }
+        out[n] = '\0';
+        bool truncated = n >= MAX_PATH - 1 && p < stop && *p != '"';
+        if (truncated) lm_block_reason = "(a folder path is too long to edit)";
+        if (!truncated && n > 0) lm_member_count++;
+        while (p < stop && *p != '"') p++;
+        if (p < stop) p++;
+    }
+
+    if (lm_member_count == MAX_MEMBERS) {
+        for (const char* q = p; q < stop; q++) {
+            if (*q == '"') {
+                lm_block_reason = "(too many folders to edit safely)";
+                break;
+            }
+        }
+    }
+}
+
+// {"additionalDirectories":["d0","d1",...]} with `count` entries
+static void build_list(char* buf, size_t cap, int count) {
+    size_t n = 0;
+    n += (size_t)snprintf(buf + n, cap - n, "{\"additionalDirectories\":[");
+    for (int i = 0; i < count; i++) {
+        n += (size_t)snprintf(buf + n, cap - n, "%s\"d%d\"", i == 0 ? "" : ",", i);
+    }
+    snprintf(buf + n, cap - n, "]}");
+}
+
+static void test_member_parse_refusals(void) {
+    static char buf[16384];
+    printf("LoadMembersFrom refuses lossy edits\n");
+
+    parse_members("{\"additionalDirectories\":[\"C:\\\\a\",\"C:\\\\b\"]}");
+    report("ordinary entries load and stay editable",
+           lm_member_count == 2 && lm_block_reason == NULL &&
+           strcmp(lm_members[0], "C:\\a") == 0 &&
+           strcmp(lm_members[1], "C:\\b") == 0);
+
+    build_list(buf, sizeof buf, MAX_MEMBERS);
+    parse_members(buf);
+    report("exactly MAX_MEMBERS entries stay editable",
+           lm_member_count == MAX_MEMBERS && lm_block_reason == NULL);
+
+    // Regression: the tail past 128 was dropped on load, and the save rewrote
+    // the array from what was read, deleting those entries from the file
+    build_list(buf, sizeof buf, MAX_MEMBERS + 1);
+    parse_members(buf);
+    report("more than MAX_MEMBERS entries refuse the edit",
+           lm_member_count == MAX_MEMBERS && lm_block_reason != NULL);
+
+    // Regression: a path over MAX_PATH was kept as its 259-char prefix and
+    // written back over the real entry
+    size_t n = (size_t)snprintf(buf, sizeof buf, "{\"additionalDirectories\":[\"");
+    for (int i = 0; i < 300; i++) buf[n++] = 'x';
+    snprintf(buf + n, sizeof buf - n, "\"]}");
+    parse_members(buf);
+    report("a path longer than MAX_PATH refuses the edit",
+           lm_block_reason != NULL && lm_member_count == 0);
+
+    // A path of exactly MAX_PATH-1 fills the buffer without being cut
+    n = (size_t)snprintf(buf, sizeof buf, "{\"additionalDirectories\":[\"");
+    for (int i = 0; i < MAX_PATH - 1; i++) buf[n++] = 'x';
+    snprintf(buf + n, sizeof buf - n, "\"]}");
+    parse_members(buf);
+    report("a path of exactly MAX_PATH-1 is not treated as truncated",
+           lm_member_count == 1 && lm_block_reason == NULL);
+
+    // Regression: \u was lowered to '?' and the '?' written back as the path
+    parse_members("{\"additionalDirectories\":[\"C:\\\\Users\\\\jos\\u00e9\"]}");
+    report("a \\u escape refuses the edit", lm_block_reason != NULL);
+}
+
 int main(void) {
     printf("drift regression tests\n\n");
     test_row_guards();
@@ -395,6 +509,8 @@ int main(void) {
     test_remove_member_disjoint();
     printf("\n");
     test_find_array_span();
+    printf("\n");
+    test_member_parse_refusals();
     printf("\n%s (%d failure%s)\n", failures == 0 ? "PASS" : "FAIL",
            failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
