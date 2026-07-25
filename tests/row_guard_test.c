@@ -278,6 +278,112 @@ static void test_remove_member_disjoint(void) {
     report("all 128 max-length row shifts operate on disjoint memory", disjoint);
 }
 
+// ---------------------------------------------------------------------------
+// 4. FindArraySpan key targeting
+// ---------------------------------------------------------------------------
+
+// Verbatim from drift.c:FindArraySpan.
+static bool FindArraySpan(const char* buf, int* out_start, int* out_end) {
+    const char* KEY = "\"additionalDirectories\"";
+    const size_t key_len = strlen(KEY);
+
+    const char* p = NULL;
+    bool in_string = false;
+    for (const char* c = buf; *c != '\0'; c++) {
+        if (in_string) {
+            if (*c == '\\' && c[1] != '\0') c++;
+            else if (*c == '"') in_string = false;
+            continue;
+        }
+        if (*c != '"') continue;
+        if (strncmp(c, KEY, key_len) != 0) {
+            in_string = true;
+            continue;
+        }
+        const char* v = c + key_len;
+        while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
+        if (*v != ':') {
+            in_string = true;
+            continue;
+        }
+        v++;
+        while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
+        if (*v != '[') return false;
+        p = v;
+        break;
+    }
+    if (p == NULL) return false;
+
+    const char* q = p + 1;
+    in_string = false;
+    while (*q != '\0') {
+        if (in_string) {
+            if (*q == '\\' && q[1] != '\0') q++;
+            else if (*q == '"') in_string = false;
+        } else {
+            if (*q == '"') in_string = true;
+            else if (*q == ']') {
+                *out_start = (int)(p - buf);
+                *out_end = (int)(q - buf);
+                return true;
+            }
+        }
+        q++;
+    }
+    return false;
+}
+
+// The exact text SaveMembersTo would splice over, so a mis-targeted span shows
+// up as the wrong array rather than merely as a wrong offset
+static bool spliced(const char* json, char* out, size_t out_size) {
+    int s, e;
+    if (!FindArraySpan(json, &s, &e)) return false;
+    size_t n = (size_t)(e - s + 1);
+    if (n >= out_size) return false;
+    memcpy(out, json + s, n);
+    out[n] = '\0';
+    return true;
+}
+
+static void test_find_array_span(void) {
+    char got[256];
+    printf("FindArraySpan key targeting\n");
+
+    report("plain key resolves to its own array",
+           spliced("{\"permissions\":{\"additionalDirectories\":[\"a\"]}}",
+                   got, sizeof got) && strcmp(got, "[\"a\"]") == 0);
+
+    report("whitespace around ':' and '[' is tolerated",
+           spliced("{\"additionalDirectories\"  :\n  [\"a\"]}", got, sizeof got) &&
+           strcmp(got, "[\"a\"]") == 0);
+
+    // Regression: strstr matched the name used as a value, and strchr then took
+    // permissions.allow's bracket, so the splice overwrote the allow rules
+    report("name appearing as a value does not retarget onto allow",
+           !spliced("{\"env\":{\"DOC\":\"additionalDirectories\"},"
+                    "\"permissions\":{\"allow\":[\"Bash(git:*)\"]}}",
+                    got, sizeof got));
+
+    // Regression: a non-array value let strchr walk on to the next array
+    report("non-array value does not retarget onto the next array",
+           !spliced("{\"permissions\":{\"additionalDirectories\":null},"
+                    "\"hooks\":{\"x\":[\"a\"]}}", got, sizeof got));
+
+    report("a key merely ending in the name is not matched",
+           spliced("{\"x-additionalDirectories\":[\"no\"],"
+                   "\"additionalDirectories\":[\"yes\"]}", got, sizeof got) &&
+           strcmp(got, "[\"yes\"]") == 0);
+
+    report("an escaped quote in an earlier string does not desync the scan",
+           spliced("{\"note\":\"say \\\"additionalDirectories\\\" loudly\","
+                   "\"additionalDirectories\":[\"ok\"]}", got, sizeof got) &&
+           strcmp(got, "[\"ok\"]") == 0);
+
+    report("a ']' inside a member string does not end the span early",
+           spliced("{\"additionalDirectories\":[\"a]b\",\"c\"]}", got, sizeof got) &&
+           strcmp(got, "[\"a]b\",\"c\"]") == 0);
+}
+
 int main(void) {
     printf("drift regression tests\n\n");
     test_row_guards();
@@ -287,6 +393,8 @@ int main(void) {
     test_append_fmt_clamp();
     printf("\n");
     test_remove_member_disjoint();
+    printf("\n");
+    test_find_array_span();
     printf("\n%s (%d failure%s)\n", failures == 0 ? "PASS" : "FAIL",
            failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
