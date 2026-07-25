@@ -1946,9 +1946,16 @@ void SaveMembersTo(const char* anchor) {
     if (snprintf(tmp, MAX_PATH, "%s.tmp", file) < MAX_PATH) {
         FILE* w = fopen(tmp, "wb");
         if (w != NULL) {
-            fwrite(out, 1, strlen(out), w);
-            fclose(w);
-            MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
+            size_t want = strlen(out);
+            bool ok = fwrite(out, 1, want, w) == want;
+            // Most of the file is still sitting in the stdio buffer, so a
+            // full disk reports the error here rather than from fwrite
+            if (fclose(w) != 0) ok = false;
+            // Renaming a short write over the real file would destroy it --
+            // drop the temp instead and leave settings.json as it was
+            if (!ok || !MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING)) {
+                DeleteFile(tmp);
+            }
         }
     }
     free(arr);
