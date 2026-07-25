@@ -1887,11 +1887,31 @@ void SaveMembersTo(const char* anchor) {
     }
     n = AppendFmt(arr, n, cap, member_count > 0 ? "\n    ]" : "]");
 
+    // Re-read the file so its other keys survive the rewrite. "Not there yet"
+    // and "there but unreadable" both leave len == 0, and treating the second
+    // as the first would drop the create-from-scratch skeleton below over a
+    // settings.json full of hooks, env and permissions. A lock (antivirus, or
+    // claude holding the file) fails fopen but not GetFileAttributes, which
+    // asks about metadata rather than opening anything
     FILE* f = fopen(file, "rb");
     int len = 0;
     if (f != NULL) {
         len = (int)fread(json_buf, 1, sizeof(json_buf) - 1, f);
+        bool read_failed = ferror(f) != 0;
         fclose(f);
+        if (read_failed) {
+            free(arr);
+            return;
+        }
+    } else {
+        DWORD attr = GetFileAttributes(file);
+        DWORD err = GetLastError();
+        bool absent = attr == INVALID_FILE_ATTRIBUTES &&
+                      (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND);
+        if (!absent) {
+            free(arr);
+            return; // leave whatever is on disk alone
+        }
     }
     json_buf[len] = '\0';
 
