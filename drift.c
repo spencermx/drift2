@@ -3188,36 +3188,50 @@ void RestoreDirectoryState() {
 void ConfirmDelete() {
     if (marked_files_count == 0) return;
 
-    CONSOLE_SCREEN_BUFFER_INFO info;
-    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
-    int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
-    int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
-
-    if (screen_width < POPUP_WIDTH || screen_height < POPUP_HEIGHT) return;
-
-    // Create popup buffer
-    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(POPUP_WIDTH * POPUP_HEIGHT * sizeof(CHAR_INFO));
-    if (popup_buffer == NULL) return;
-    DrawDeletePopup(POPUP_WIDTH, POPUP_HEIGHT, popup_buffer);
-
-    // Center the popup on screen
-    int start_col = info.srWindow.Left + (screen_width - POPUP_WIDTH) / 2;
-    int start_row = info.srWindow.Top + (screen_height - POPUP_HEIGHT) / 2;
-
-    COORD buffer_size = { POPUP_WIDTH, POPUP_HEIGHT };
-    COORD origin = { 0, 0 };
-    SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
-                          (SHORT)(start_col + POPUP_WIDTH - 1), (SHORT)(start_row + POPUP_HEIGHT - 1) };
-    WriteConsoleOutputW(hAlt, popup_buffer, buffer_size, origin, &region);
-
-    free(popup_buffer);
-
-    // Wait for input
+    // Painted from inside the loop so a resize can repaint it. The console
+    // reflows on resize and wipes the popup, and this loop leaves 'Y' armed --
+    // so a prompt that was still live used to be sitting there invisible,
+    // over a screen that was not redrawn either
+    bool repaint = true;
     while (1) {
+        if (repaint) {
+            CONSOLE_SCREEN_BUFFER_INFO info;
+            if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
+            int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
+            int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
+
+            // Shrunk too far to show the prompt: cancel rather than stay armed
+            // behind nothing. Marks are kept, as with any other cancel
+            if (screen_width < POPUP_WIDTH || screen_height < POPUP_HEIGHT) return;
+
+            CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(POPUP_WIDTH * POPUP_HEIGHT * sizeof(CHAR_INFO));
+            if (popup_buffer == NULL) return;
+            DrawDeletePopup(POPUP_WIDTH, POPUP_HEIGHT, popup_buffer);
+
+            // Center the popup on screen
+            int start_col = info.srWindow.Left + (screen_width - POPUP_WIDTH) / 2;
+            int start_row = info.srWindow.Top + (screen_height - POPUP_HEIGHT) / 2;
+
+            COORD buffer_size = { POPUP_WIDTH, POPUP_HEIGHT };
+            COORD origin = { 0, 0 };
+            SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
+                                  (SHORT)(start_col + POPUP_WIDTH - 1), (SHORT)(start_row + POPUP_HEIGHT - 1) };
+            WriteConsoleOutputW(hAlt, popup_buffer, buffer_size, origin, &region);
+
+            free(popup_buffer);
+            repaint = false;
+        }
+
         INPUT_RECORD input;
         DWORD events;
         if (!ReadConsoleInput(hIn, &input, 1, &events)) {
             break; // Treat console failure as cancel
+        }
+
+        if (input.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            DrawScreen(); // restore what the popup sits on top of
+            repaint = true;
+            continue;
         }
 
         if (input.EventType == KEY_EVENT && input.Event.KeyEvent.bKeyDown) {
