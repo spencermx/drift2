@@ -100,10 +100,10 @@
 #define CREATE_POPUP_WIDTH 50
 #define COLUMN_DIVIDER_POSITION 28
 #define MIN_WINDOW_WIDTH (COLUMN_DIVIDER_POSITION + 8)
-// Panes draw at fixed rows up to 6 (the session-detail pane's "id:" line), so
-// anything shorter cannot hold the layout. The per-site "row < height" guards
-// are what actually keeps writes in bounds; this only rules out geometry where
-// the panes would have nothing left to draw
+// Row 0 is the header and row 1 the rule, so anything shorter than this has
+// no room for a pane's first line at row 2. The per-site "row < height"
+// guards are what actually keeps writes in bounds; this only rules out
+// geometry where the panes would have nothing left to draw
 #define MIN_WINDOW_HEIGHT 7
 // Third (context/preview) pane appears when the window is at least this wide.
 // The current pane takes two thirds of the remaining width on narrow windows
@@ -1761,34 +1761,47 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
         }
     }
 
-    // Third pane: selected session details
-    if (divider2 < width) {
-        WriteToBuffer(buffer, width, height - 1, divider2 + 2, "Enter resume  n new  r rename  d delete", gray);
-    }
-    if (divider2 >= width || session_count == 0) return;
+    // Third pane: the keymap, then details of the selected session.
+    //
+    // The keymap leads. In the workspace view it lives top-left, but here that
+    // pane holds the workspace list, so this is the only place it fits -- and
+    // on the bottom line it went unread. It also has to be what a workspace
+    // with no sessions shows, since "n  new session" is the answer to the only
+    // question an empty session list raises. Each verb names its object: "new"
+    // and "delete" alone read as being about the workspace.
+    if (divider2 >= width) return;
     int col_start = divider2 + 2;
-    SessionEntry* sel = &sessions[session_selected];
+    int row = 2;
+    if (row < height) WriteToBuffer(buffer, width, row++, col_start, "Enter  resume session", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, col_start, "n      new session", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, col_start, "r      rename session", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, col_start, "d      delete session", gray);
+    row++;
 
     char ws_disp[MAX_PATH];
     WorkspaceDisplayName(claude_workspace_name, ws_disp, sizeof(ws_disp));
-    WriteToBuffer(buffer, width, 2, col_start, ws_disp, yellow);
+    if (row < height) WriteToBuffer(buffer, width, row++, col_start, ws_disp, yellow);
     char meta[64];
     snprintf(meta, sizeof(meta), "%d session%s", session_count, session_count == 1 ? "" : "s");
-    if (3 < height) WriteToBuffer(buffer, width, 3, col_start, meta, white);
+    if (row < height) WriteToBuffer(buffer, width, row++, col_start, meta, white);
+
+    if (session_count == 0) return;
+    SessionEntry* sel = &sessions[session_selected];
+    row++;
 
     char age[16];
     FormatAge(sel->mtime, age, sizeof(age));
     snprintf(meta, sizeof(meta), "last active: %s", age);
-    if (5 < height) WriteToBuffer(buffer, width, 5, col_start, meta, white);
+    if (row < height) WriteToBuffer(buffer, width, row++, col_start, meta, white);
     snprintf(meta, sizeof(meta), "id: %s", sel->id);
-    if (6 < height) WriteToBuffer(buffer, width, 6, col_start, meta, gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, col_start, meta, gray);
+    row++;
 
-    // First prompt, wrapped to the pane
+    // The session's name, wrapped to the pane
     int pane_w = width - 1 - col_start;
     if (pane_w < 8) return;
     int total = (int)strlen(sel->name);
     int off = 0;
-    int row = 8;
     while (off < total && row < height) {
         char chunk[200];
         int c = total - off;
@@ -2255,9 +2268,9 @@ void DrawClaudeHelpPane(CHAR_INFO* buffer, int width, int height) {
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "e    edit workspace", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "f    workspace files", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "a    new workspace", gray);
-    if (row < height) WriteToBuffer(buffer, width, row++, 0, "r    rename", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "r    rename workspace", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "y/p  duplicate", gray);
-    if (row < height) WriteToBuffer(buffer, width, row++, 0, "d    delete", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "d    delete workspace", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "c    back to files", gray);
 }
 
@@ -2286,7 +2299,9 @@ void DrawClaudeInfoPane(CHAR_INFO* buffer, int width, int height, int divider2) 
         if (5 < height) WriteToBuffer(buffer, width, 5, col, "this workspace opens in Claude", gray);
         return;
     }
-    int rows = height - 5; // keep the last line free for the hints
+    // No keymap line down here: this view already carries the full one in the
+    // left pane, where it reads at the top rather than along the bottom edge
+    int rows = height - 4;
     for (int i = 0; i < rows && i < session_count; i++) {
         char age[16];
         FormatAge(sessions[i].mtime, age, sizeof(age));
@@ -2294,8 +2309,6 @@ void DrawClaudeInfoPane(CHAR_INFO* buffer, int width, int height, int divider2) 
         snprintf(row_text, sizeof(row_text), "%-4s %s", age, sessions[i].name);
         WriteToBuffer(buffer, width, 4 + i, col, row_text, white);
     }
-
-    WriteToBuffer(buffer, width, height - 1, col, "l open  r rename  e edit  a new  d delete", gray);
 }
 
 // The pinned folder list while a workspace edit is armed: the whole design
@@ -2312,12 +2325,12 @@ void DrawManifestPane(CHAR_INFO* buffer, int width, int height, int divider2) {
     // Keymap stacked one shortcut per line, same style as the main page
     int row = 4;
     if (manifest_focused) {
-        if (row < height) WriteToBuffer(buffer, width, row++, col, "x      remove folder", gray);
+        // Space, not x: it means "act on the folder under the cursor" in both
+        // states, so one key covers the whole page. x stays as an alias.
+        if (row < height) WriteToBuffer(buffer, width, row++, col, "Space  remove folder", gray);
         if (row < height) WriteToBuffer(buffer, width, row++, col, "Enter  jump to folder", gray);
     } else {
-        // "add/remove" without a trailing noun: this pane is 23 columns wide
-        // on an 80-column window, which is the default console size
-        if (row < height) WriteToBuffer(buffer, width, row++, col, "Space  add/remove", gray);
+        if (row < height) WriteToBuffer(buffer, width, row++, col, "Space  add/remove folder", gray);
         if (row < height) WriteToBuffer(buffer, width, row++, col, "Tab    focus this list", gray);
         if (row < height) WriteToBuffer(buffer, width, row++, col, "Esc    done", gray);
     }
