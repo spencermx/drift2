@@ -335,6 +335,13 @@ char workspace_names[32768];
 bool workspace_names_loaded = false;
 
 enum MarkStatus mark_status = MARKED;
+// True when the current set was created by y/x/d falling back to the cursor
+// row rather than built deliberately with Space. Such a set is a transient
+// "this file", so the next verb re-aims at the cursor instead of reusing it.
+// Provenance rather than count: keying on "exactly one mark" would go back to
+// discarding a deliberate single Space mark, which is what HandleMarkOperation
+// stopped doing
+bool implicit_mark = false;
 // =========================== Global Variables ==============================
 int main(int argc, char* argv[]) {
     Initialize();
@@ -2701,10 +2708,12 @@ int HandleInput() {
             case 'D': {
                 if (current_directory_file_count == 0) break;
 
-                if (!IsMarkDirectorySet() || !MarkDirEqualToCurrentDir()) {
+                if (!IsMarkDirectorySet() || !MarkDirEqualToCurrentDir() ||
+                    implicit_mark) {
                     ClearMarkedFiles();
                     strcpy(mark_directory, current_directory);
                     ToggleMark();
+                    implicit_mark = true;
                 }
                 ConfirmDelete();
                 break;
@@ -2722,6 +2731,7 @@ int HandleInput() {
                 }
 
                 ToggleMark();
+                implicit_mark = false; // curated by hand from here on
                 ModifySelectedRow(1);
                 break;
             }
@@ -2816,10 +2826,12 @@ void HandleMarkOperation(enum MarkStatus new_status) {
     // Otherwise mark the cursor line. (No special case for a single mark --
     // that previously cleared the marked file and yanked the cursor line
     // instead.)
-    if (!IsMarkDirectorySet() || !MarkDirEqualToCurrentDir() || marked_files_count == 0) {
+    if (!IsMarkDirectorySet() || !MarkDirEqualToCurrentDir() ||
+        marked_files_count == 0 || implicit_mark) {
         ClearMarkedFiles();
         strcpy(mark_directory, current_directory);
         ToggleMark();
+        implicit_mark = true;
     }
     SetMarkStatus(new_status);
 }
@@ -3719,6 +3731,7 @@ void WriteToBuffer(CHAR_INFO* buffer, int width, int row, int col, const char* t
 void ClearMarkedFiles() {
     mark_directory[0] = '\0';
     marked_files_count = 0;
+    implicit_mark = false;
     SetMarkStatus(MARKED);
 }
 
