@@ -1,11 +1,12 @@
 // Regression tests for the memory-safety fixes in drift.c.
 //
 // drift.c is Windows-only, so these tests mirror the exact arithmetic of the
-// routines under test rather than linking against them. tests/lint_row_guards.py
+// routines under test rather than linking against them. tests/lint_row_guards.c
 // is the companion check that keeps drift.c itself in sync with the invariant
 // proved here.
 //
-// Build and run:  tests/run_tests.sh
+// Build and run:  tests/run_tests.sh   (Unix)
+//                 tests\run_tests.bat  (Windows/MSVC)
 //
 // Covers:
 //   1. WriteToBuffer row-guard invariant -- the frame buffer holds exactly
@@ -17,6 +18,8 @@
 //      clamped replacement for the bare `n += snprintf(...)` idiom.
 //   3. RemoveMemberAt's row-shifting strcpy operates on disjoint memory
 //      (GCC's -fanalyzer reports a false positive here).
+
+#define _CRT_SECURE_NO_WARNINGS // MSVC deprecates strcpy; drift.c uses it too
 
 #include <assert.h>
 #include <stdbool.h>
@@ -198,7 +201,9 @@ static void test_save_members_bound(void) {
     }
     n += snprintf(arr + n, cap - n, "\n    ]");
 
-    printf("    n=%zu cap=%zu headroom=%zd\n", n, cap, (ssize_t)cap - (ssize_t)n);
+    // long long, not ssize_t: the latter is POSIX-only and absent on MSVC
+    printf("    n=%llu cap=%llu headroom=%lld\n", (unsigned long long)n,
+           (unsigned long long)cap, (long long)cap - (long long)n);
     report("no snprintf truncation, so `cap - n` never wraps", !wrapped && n < cap);
     report("final array fits inside cap", strlen(arr) < cap);
     free(arr);
