@@ -1850,7 +1850,15 @@ void LoadMembersFrom(const char* anchor) {
             }
         }
         out[n] = '\0';
-        if (n > 0) {
+        // The copy stopping on the buffer bound rather than on the closing
+        // quote means this path was cut short. Saving would write the prefix
+        // back over the real entry, and a cut landing on a separator would
+        // widen a grant on one subdirectory into the whole parent
+        bool truncated = n >= MAX_PATH - 1 && p < stop && *p != '"';
+        if (truncated) {
+            json_block_reason = "(a folder path is too long to edit)";
+        }
+        if (!truncated && n > 0) {
             if (host && out[0] == '/') {
                 char tmp[MAX_PATH];
                 if (snprintf(tmp, sizeof(tmp), "%s%s", host_drive, out) < (int)sizeof(tmp)) {
