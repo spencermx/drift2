@@ -185,7 +185,7 @@ void LoadWorkspaceNames();
 bool FindArraySpan(const char* buf, int* out_start, int* out_end);
 void LoadMembersFrom(const char* anchor);
 size_t AppendFmt(char* buf, size_t n, size_t cap, const char* fmt, ...);
-void SaveMembersTo(const char* anchor);
+bool SaveMembersTo(const char* anchor);
 int FindMember(const char* path);
 void RemoveMemberAt(int index);
 void ToggleMemberUnderCursor();
@@ -1975,19 +1975,22 @@ size_t AppendFmt(char* buf, size_t n, size_t cap, const char* fmt, ...) {
     return (size_t)written >= cap - n ? cap - 1 : n + (size_t)written;
 }
 
-void SaveMembersTo(const char* anchor) {
-    if (json_block_reason != NULL) return;
+// Returns whether settings.json now holds the member list. False means the
+// file was deliberately left alone, so a caller showing the list is showing
+// something the file does not contain
+bool SaveMembersTo(const char* anchor) {
+    if (json_block_reason != NULL) return false;
 
     char dir[MAX_PATH];
-    if (snprintf(dir, MAX_PATH, "%s\\.claude", anchor) >= MAX_PATH) return;
+    if (snprintf(dir, MAX_PATH, "%s\\.claude", anchor) >= MAX_PATH) return false;
     CreateDirectory(dir, NULL);
     char file[MAX_PATH];
-    if (snprintf(file, MAX_PATH, "%s\\.claude\\settings.json", anchor) >= MAX_PATH) return;
+    if (snprintf(file, MAX_PATH, "%s\\.claude\\settings.json", anchor) >= MAX_PATH) return false;
 
     // Build the replacement array text, JSON-escaping backslashes
     size_t cap = (size_t)MAX_MEMBERS * (MAX_PATH * 2 + 16) + 64;
     char* arr = (char*)malloc(cap);
-    if (arr == NULL) return;
+    if (arr == NULL) return false;
     // Under the Wine wrapper, write entries host-style so the host claude
     // can actually resolve them
     char host_drive[8];
@@ -2036,7 +2039,7 @@ void SaveMembersTo(const char* anchor) {
         if (too_big) json_block_reason = "(settings.json too large to edit)";
         if (read_failed || too_big) {
             free(arr);
-            return;
+            return false;
         }
     } else {
         DWORD attr = GetFileAttributes(file);
@@ -2045,7 +2048,7 @@ void SaveMembersTo(const char* anchor) {
                       (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND);
         if (!absent) {
             free(arr);
-            return; // leave whatever is on disk alone
+            return false; // leave whatever is on disk alone
         }
     }
     json_buf[len] = '\0';
@@ -2053,7 +2056,7 @@ void SaveMembersTo(const char* anchor) {
     char* out = (char*)malloc((size_t)len + cap + 256);
     if (out == NULL) {
         free(arr);
-        return;
+        return false;
     }
 
     int s, e;
@@ -2071,7 +2074,7 @@ void SaveMembersTo(const char* anchor) {
         if (brace == NULL) { // not JSON we understand -- leave it alone
             free(arr);
             free(out);
-            return;
+            return false;
         }
         int at = (int)(brace - json_buf) + 1;
         const char* look = json_buf + at;
@@ -2097,6 +2100,7 @@ void SaveMembersTo(const char* anchor) {
     }
 
     // Write via temp + rename so a crash can't leave a half-written file
+    bool saved = false;
     char tmp[MAX_PATH];
     if (snprintf(tmp, MAX_PATH, "%s.tmp", file) < MAX_PATH) {
         FILE* w = fopen(tmp, "wb");
@@ -2110,11 +2114,14 @@ void SaveMembersTo(const char* anchor) {
             // drop the temp instead and leave settings.json as it was
             if (!ok || !MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING)) {
                 DeleteFile(tmp);
+            } else {
+                saved = true;
             }
         }
     }
     free(arr);
     free(out);
+    return saved;
 }
 
 int FindMember(const char* path) {
@@ -2132,7 +2139,13 @@ void RemoveMemberAt(int index) {
     if (manifest_selected >= member_count && manifest_selected > 0) {
         manifest_selected = member_count - 1;
     }
-    SaveMembersTo(edit_workspace);
+    if (!SaveMembersTo(edit_workspace)) {
+        // Keeping the edit would leave the pane listing a workspace that
+        // settings.json does not describe, and invite a second failed write
+        // on top of it. Resync from the file and say the change did not land
+        LoadMembersFrom(edit_workspace);
+        NotifyAndWait("settings.json was not updated -- press a key");
+    }
 }
 
 void ToggleMemberUnderCursor() {
@@ -2149,7 +2162,10 @@ void ToggleMemberUnderCursor() {
     if (member_count >= MAX_MEMBERS) return;
     strcpy(members[member_count], path);
     member_count++;
-    SaveMembersTo(edit_workspace);
+    if (!SaveMembersTo(edit_workspace)) {
+        LoadMembersFrom(edit_workspace);
+        NotifyAndWait("settings.json was not updated -- press a key");
+    }
 }
 
 void EnterEditMode() {
@@ -2334,7 +2350,9 @@ void HandleQuickAdd() {
                 } else {
                     strcpy(members[member_count], target);
                     member_count++;
-                    SaveMembersTo(anchor);
+                    if (!SaveMembersTo(anchor)) {
+                        refused = "settings.json could not be written";
+                    }
                 }
                 char msg[160];
                 if (refused == NULL) {
