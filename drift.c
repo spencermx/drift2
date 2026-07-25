@@ -2732,7 +2732,12 @@ int HandleInput() {
 
                 ToggleMark();
                 implicit_mark = false; // curated by hand from here on
-                ModifySelectedRow(1);
+                // Advance, but do not wrap the way 'j' does: coming back
+                // around to row 0 would toggle marks the user just made
+                // back off, one per keypress, until the set was gone
+                if (selected_row < current_directory_file_count - 1) {
+                    ModifySelectedRow(1);
+                }
                 break;
             }
             case VK_RETURN: {
