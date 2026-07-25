@@ -30,6 +30,14 @@
 //              opens a workspace's session list, h/Esc backs out. Sessions
 //              are read from %USERPROFILE%\.claude\projects (override the
 //              .claude location with DRIFT_CLAUDE_DIR).
+// - E        : (in the workspace list) edit a workspace's folders by
+//              browsing: Space toggles the directory under the cursor,
+//              members show a '+', the third pane pins the folder list.
+//              Tab focuses that list (x removes, Enter jumps the browser
+//              there), Esc finishes. Folder membership is written to the
+//              workspace's .claude\settings.json additionalDirectories.
+// - Shift+W  : (while browsing) add the directory under the cursor to a
+//              workspace picked from a popup
 //
 // Layout: three panes when the window is at least 80 columns wide --
 // parent | current | context. The context pane previews the selected item:
@@ -131,13 +139,25 @@ void FormatSize(ULONGLONG size, char* out, int out_size);
 void EnterClaudeMode();
 void ExitClaudeMode();
 void EnterSessionsView();
-void LoadSessions();
+void LoadSessionsFor(const char* anchor);
 void ParseSessionTitle(const char* path, char* out, int out_size);
 int CompareSessions(const void* a, const void* b);
 void FormatAge(FILETIME ft, char* out, int out_size);
 void EncodeProjectPath(const char* path, char* out, bool keep_dots);
 void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, int list_height);
 void DrawClaudeInfoPane(CHAR_INFO* buffer, int width, int height, int divider2);
+void DrawClaudeHelpPane(CHAR_INFO* buffer, int width, int height);
+bool GetWorkspacesRoot(char* out);
+bool FindArraySpan(const char* buf, int* out_start, int* out_end);
+void LoadMembersFrom(const char* anchor);
+void SaveMembersTo(const char* anchor);
+int FindMember(const char* path);
+void RemoveMemberAt(int index);
+void ToggleMemberUnderCursor();
+void EnterEditMode();
+void ExitEditMode();
+void HandleQuickAdd();
+void DrawManifestPane(CHAR_INFO* buffer, int width, int height, int divider2);
 bool GetSelectedRowPath(int selected_row, char* out_path);
 bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file_data, char* out_path);
 int CalculateDistance(char* current, char* target);
@@ -233,6 +253,21 @@ char workspaces_root[MAX_PATH];
 char claude_workspace[MAX_PATH];      // anchor path of the open workspace
 char claude_workspace_name[MAX_PATH];
 char claude_return_dir[MAX_PATH];     // where to go back to on exit
+
+// Workspace editing ("armed") mode: browse normally while the third pane
+// pins the workspace's folder list; Space toggles membership
+#define MAX_MEMBERS 128
+bool edit_armed = false;
+char edit_workspace[MAX_PATH];
+char edit_workspace_name[MAX_PATH];
+char members[MAX_MEMBERS][MAX_PATH];
+int member_count = 0;
+bool manifest_focused = false;
+int manifest_selected = 0;
+int manifest_top = 0;
+char json_buf[65536];
+bool json_too_big = false; // refuse edits rather than corrupt a huge file
+char sessions_loaded_for[MAX_PATH]; // cache key for the sessions[] array
 
 enum MarkStatus mark_status = MARKED;
 // =========================== Global Variables ==============================
@@ -399,16 +434,23 @@ void DrawScreen() {
         char claude_title[MAX_PATH + 32];
         char* header_path;
         if (claude_mode == CM_WORKSPACES) {
-            snprintf(claude_title, sizeof(claude_title), "claude workspaces");
+            snprintf(claude_title, sizeof(claude_title), "Claude Workspaces");
             header_path = claude_title;
         } else if (claude_mode == CM_SESSIONS) {
-            snprintf(claude_title, sizeof(claude_title), "claude workspaces > %s", claude_workspace_name);
+            snprintf(claude_title, sizeof(claude_title), "Claude Workspaces > %s", claude_workspace_name);
             header_path = claude_title;
         } else {
             header_path = current_directory;
         }
         WORD header_color = claude_mode == CM_OFF ? blue : yellow;
-        int path_avail = right_col - 2;
+        int path_col = 0;
+        if (claude_mode == CM_OFF && edit_armed) {
+            char tag[96];
+            snprintf(tag, sizeof(tag), "[editing workspace %s] ", edit_workspace_name);
+            WriteToBuffer(buffer, width, 0, 0, tag, yellow);
+            path_col = (int)strlen(tag);
+        }
+        int path_avail = right_col - 2 - path_col;
         int path_len = (int)strlen(header_path);
         char path_display[MAX_PATH + 4];
         if (path_len <= path_avail) {
@@ -419,13 +461,14 @@ void DrawScreen() {
         } else {
             path_display[0] = '\0';
         }
-        WriteToBuffer(buffer, width, 0, 0, path_display, header_color);
+        WriteToBuffer(buffer, width, 0, path_col, path_display, header_color);
     }
 
     // Horizontal rule under the header, with a junction where it crosses
     // the column divider
     // Frame follows the mode: blue for files, claude-orange in claude mode
-    WORD frame_color = claude_mode == CM_OFF ? blue : orange;
+    // and while a workspace edit is armed
+    WORD frame_color = (claude_mode == CM_OFF && !edit_armed) ? blue : orange;
     for (int col = 0; col < width; col++) {
         int index = width + col;
         bool junction = col == COLUMN_DIVIDER_POSITION || (three_pane && col == divider2);
@@ -435,7 +478,7 @@ void DrawScreen() {
     // ============================= Draw Header Line ==================================
 
     // ============================= Draw Parent Directory =============================
-    for (int i = 0; claude_mode != CM_SESSIONS && i < list_height && i < parent_directory_file_count; i++) {
+    for (int i = 0; claude_mode == CM_OFF && i < list_height && i < parent_directory_file_count; i++) {
         int file_index = i;
 
         color = FileColor(&parent_directory_files[file_index]);
@@ -479,7 +522,9 @@ void DrawScreen() {
             color = yellow; // claude mode: directories join the claude palette
         }
 
-        if (is_selected) {
+        // Only one selection bar is ever on screen -- it lives wherever the
+        // focus is, so it vanishes here while the manifest list is focused
+        if (is_selected && !manifest_focused) {
             // Remap the foreground to its dark variant (white becomes black)
             // and paint the whole pane-width segment as the selection bar
             WORD fg = color & (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
@@ -504,7 +549,7 @@ void DrawScreen() {
         // ================== Highlight marked files in the current directory ==================
         // Matched by path, not row index, so highlights survive directory
         // reloads and re-sorting
-        if (marked_files_count > 0 && MarkDirEqualToCurrentDir()) {
+        if (!edit_armed && marked_files_count > 0 && MarkDirEqualToCurrentDir()) {
             char row_path[MAX_PATH];
             // A row whose path can't be built (mangled or over-long name)
             // can never be in marked_files, and row_path would be unset
@@ -537,18 +582,44 @@ void DrawScreen() {
             }
         }
         // ================== Highlight marked files in the current directory ==================
+
+        // While a workspace edit is armed, member directories show a '+'
+        if (edit_armed && claude_mode == CM_OFF && IsDirectory(&current_directory_files[file_index])) {
+            char row_path[MAX_PATH];
+            if (GetFilePath(current_directory, &current_directory_files[file_index], row_path) &&
+                FindMember(row_path) >= 0) {
+                int mark_index = (i + 2) * width + COLUMN_DIVIDER_POSITION + 1;
+                buffer[mark_index].Char.UnicodeChar = L'+';
+                buffer[mark_index].Attributes = (is_selected && !manifest_focused)
+                    ? ((yellow & (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE)) | bar_background)
+                    : yellow;
+            }
+        }
     }
     // ============================= Draw Current Directory ============================
 
-    // Empty directories get an explicit placeholder instead of a blank pane
+    // Empty directories get an explicit placeholder instead of a blank pane;
+    // an empty workspace list also says what to do about it
     if (claude_mode != CM_SESSIONS && current_directory_file_count == 0) {
-        WriteToBuffer(buffer, width, 2, COLUMN_DIVIDER_POSITION + 4, "(empty)", gray);
+        if (claude_mode == CM_WORKSPACES) {
+            WriteToBuffer(buffer, width, 2, COLUMN_DIVIDER_POSITION + 4, "(no workspaces yet)", gray);
+            WriteToBuffer(buffer, width, 3, COLUMN_DIVIDER_POSITION + 4, "press a to create one", gray);
+        } else {
+            WriteToBuffer(buffer, width, 2, COLUMN_DIVIDER_POSITION + 4, "(empty)", gray);
+        }
     }
 
-    if (three_pane && claude_mode == CM_OFF && current_directory_file_count > 0) {
+    if (three_pane && claude_mode == CM_OFF && !edit_armed && current_directory_file_count > 0) {
         DrawContextPane(buffer, width, height, divider2);
     }
 
+    if (three_pane && claude_mode == CM_OFF && edit_armed) {
+        DrawManifestPane(buffer, width, height, divider2);
+    }
+
+    if (claude_mode == CM_WORKSPACES) {
+        DrawClaudeHelpPane(buffer, width, height);
+    }
     if (three_pane && claude_mode == CM_WORKSPACES) {
         DrawClaudeInfoPane(buffer, width, height, divider2);
     }
@@ -696,22 +767,28 @@ void FormatSize(ULONGLONG size, char* out, int out_size) {
 // ============================= Context Pane ======================================
 
 // ============================= Claude Workspaces =================================
-void EnterClaudeMode() {
+bool GetWorkspacesRoot(char* out) {
     char home[MAX_PATH];
     DWORD len = GetEnvironmentVariable("DRIFT_HOME", home, MAX_PATH);
     if (len == 0 || len >= MAX_PATH) {
         len = GetEnvironmentVariable("USERPROFILE", home, MAX_PATH);
     }
-    if (len == 0 || len >= MAX_PATH) return;
+    if (len == 0 || len >= MAX_PATH) return false;
 
     char path[MAX_PATH];
-    if (snprintf(path, MAX_PATH, "%s\\.drift", home) >= MAX_PATH) return;
+    if (snprintf(path, MAX_PATH, "%s\\.drift", home) >= MAX_PATH) return false;
     CreateDirectory(path, NULL); // ok if it already exists
-    if (snprintf(path, MAX_PATH, "%s\\.drift\\workspaces", home) >= MAX_PATH) return;
-    CreateDirectory(path, NULL);
+    if (snprintf(out, MAX_PATH, "%s\\.drift\\workspaces", home) >= MAX_PATH) return false;
+    CreateDirectory(out, NULL);
+    return true;
+}
 
+void EnterClaudeMode() {
+    char root[MAX_PATH];
+    if (!GetWorkspacesRoot(root)) return;
     strcpy(claude_return_dir, current_directory);
-    strcpy(workspaces_root, path);
+    strcpy(workspaces_root, root);
+    sessions_loaded_for[0] = '\0'; // sessions may have changed since last visit
     ChangeCurrentDirectory(workspaces_root);
     claude_mode = CM_WORKSPACES;
 }
@@ -727,7 +804,7 @@ void EnterSessionsView() {
         return;
     }
     snprintf(claude_workspace_name, MAX_PATH, "%s", name);
-    LoadSessions();
+    LoadSessionsFor(claude_workspace);
     session_selected = 0;
     session_top = 0;
     claude_mode = CM_SESSIONS;
@@ -747,7 +824,9 @@ void EncodeProjectPath(const char* path, char* out, bool keep_dots) {
     out[n] = '\0';
 }
 
-void LoadSessions() {
+void LoadSessionsFor(const char* anchor) {
+    if (_stricmp(anchor, sessions_loaded_for) == 0) return; // already loaded
+    snprintf(sessions_loaded_for, MAX_PATH, "%s", anchor);
     session_count = 0;
 
     char claude_root[MAX_PATH];
@@ -761,10 +840,10 @@ void LoadSessions() {
 
     char enc[MAX_PATH];
     char dir[MAX_PATH];
-    EncodeProjectPath(claude_workspace, enc, false);
+    EncodeProjectPath(anchor, enc, false);
     if (snprintf(dir, MAX_PATH, "%s\\projects\\%s", claude_root, enc) >= MAX_PATH) return;
     if (GetFileAttributes(dir) == INVALID_FILE_ATTRIBUTES) {
-        EncodeProjectPath(claude_workspace, enc, true);
+        EncodeProjectPath(anchor, enc, true);
         if (snprintf(dir, MAX_PATH, "%s\\projects\\%s", claude_root, enc) >= MAX_PATH) return;
         if (GetFileAttributes(dir) == INVALID_FILE_ATTRIBUTES) return; // no sessions yet
     }
@@ -922,10 +1001,10 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
     int col_start = divider2 + 2;
     SessionEntry* sel = &sessions[session_selected];
 
-    WriteToBuffer(buffer, width, 2, col_start, claude_workspace_name, white);
+    WriteToBuffer(buffer, width, 2, col_start, claude_workspace_name, yellow);
     char meta[64];
-    snprintf(meta, sizeof(meta), "%d session(s)", session_count);
-    WriteToBuffer(buffer, width, 3, col_start, meta, gray);
+    snprintf(meta, sizeof(meta), "%d session%s", session_count, session_count == 1 ? "" : "s");
+    WriteToBuffer(buffer, width, 3, col_start, meta, white);
 
     char age[16];
     FormatAge(sel->mtime, age, sizeof(age));
@@ -952,26 +1031,459 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
         row++;
     }
 }
-// In the workspace list, the third pane explains what this mode is and how
-// to drive it instead of uselessly previewing the anchor directory
+// ============================= Workspace Designer ================================
+// Membership lives in <anchor>\.claude\settings.json under
+// permissions.additionalDirectories -- the file Claude Code natively reads.
+// Editing splices only that array so any other settings in the file survive.
+
+// Locates the additionalDirectories [...] span. start/end index '[' and ']'.
+bool FindArraySpan(const char* buf, int* out_start, int* out_end) {
+    const char* key = strstr(buf, "\"additionalDirectories\"");
+    if (key == NULL) return false;
+    const char* p = strchr(key, '[');
+    if (p == NULL) return false;
+    const char* q = p + 1;
+    bool in_string = false;
+    while (*q != '\0') {
+        if (in_string) {
+            if (*q == '\\' && q[1] != '\0') q++;
+            else if (*q == '"') in_string = false;
+        } else {
+            if (*q == '"') in_string = true;
+            else if (*q == ']') {
+                *out_start = (int)(p - buf);
+                *out_end = (int)(q - buf);
+                return true;
+            }
+        }
+        q++;
+    }
+    return false;
+}
+
+void LoadMembersFrom(const char* anchor) {
+    member_count = 0;
+    json_too_big = false;
+
+    char file[MAX_PATH];
+    if (snprintf(file, MAX_PATH, "%s\\.claude\\settings.json", anchor) >= MAX_PATH) return;
+    FILE* f = fopen(file, "rb");
+    if (f == NULL) return;
+    int len = (int)fread(json_buf, 1, sizeof(json_buf) - 1, f);
+    int extra = fgetc(f); // anything left means the file exceeds our buffer
+    fclose(f);
+    json_buf[len] = '\0';
+    if (extra != EOF) {
+        json_too_big = true; // a partial parse could corrupt the file on save
+        return;
+    }
+
+    int s, e;
+    if (!FindArraySpan(json_buf, &s, &e)) return;
+    const char* p = json_buf + s + 1;
+    const char* stop = json_buf + e;
+    while (p < stop && member_count < MAX_MEMBERS) {
+        if (*p != '"') {
+            p++;
+            continue;
+        }
+        p++;
+        char* out = members[member_count];
+        int n = 0;
+        while (p < stop && *p != '"' && n < MAX_PATH - 1) {
+            if (*p == '\\' && p + 1 < stop) {
+                p++;
+                if (*p == 'u') {
+                    out[n++] = '?';
+                    p++;
+                    for (int k = 0; k < 4 && p < stop; k++) p++;
+                    continue;
+                }
+                out[n++] = *p++;
+            } else {
+                out[n++] = *p++;
+            }
+        }
+        out[n] = '\0';
+        if (n > 0) member_count++;
+        while (p < stop && *p != '"') p++; // resync if the copy was truncated
+        if (p < stop) p++;
+    }
+}
+
+void SaveMembersTo(const char* anchor) {
+    if (json_too_big) return;
+
+    char dir[MAX_PATH];
+    if (snprintf(dir, MAX_PATH, "%s\\.claude", anchor) >= MAX_PATH) return;
+    CreateDirectory(dir, NULL);
+    char file[MAX_PATH];
+    if (snprintf(file, MAX_PATH, "%s\\.claude\\settings.json", anchor) >= MAX_PATH) return;
+
+    // Build the replacement array text, JSON-escaping backslashes
+    size_t cap = (size_t)MAX_MEMBERS * (MAX_PATH * 2 + 16) + 64;
+    char* arr = (char*)malloc(cap);
+    if (arr == NULL) return;
+    size_t n = 0;
+    n += snprintf(arr + n, cap - n, "[");
+    for (int i = 0; i < member_count; i++) {
+        n += snprintf(arr + n, cap - n, "%s\n      \"", i == 0 ? "" : ",");
+        for (const char* p = members[i]; *p != '\0' && n < cap - 8; p++) {
+            if (*p == '\\' || *p == '"') arr[n++] = '\\';
+            arr[n++] = *p;
+        }
+        arr[n] = '\0';
+        n += snprintf(arr + n, cap - n, "\"");
+    }
+    n += snprintf(arr + n, cap - n, member_count > 0 ? "\n    ]" : "]");
+
+    FILE* f = fopen(file, "rb");
+    int len = 0;
+    if (f != NULL) {
+        len = (int)fread(json_buf, 1, sizeof(json_buf) - 1, f);
+        fclose(f);
+    }
+    json_buf[len] = '\0';
+
+    char* out = (char*)malloc((size_t)len + cap + 256);
+    if (out == NULL) {
+        free(arr);
+        return;
+    }
+
+    int s, e;
+    if (len > 0 && FindArraySpan(json_buf, &s, &e)) {
+        // Replace just the array; everything else in the file survives
+        memcpy(out, json_buf, s);
+        out[s] = '\0';
+        strcat(out, arr);
+        strcat(out, json_buf + e + 1);
+    } else if (len > 0) {
+        // No additionalDirectories yet: insert into the permissions object
+        // if there is one, otherwise into the root object
+        char* perm = strstr(json_buf, "\"permissions\"");
+        char* brace = perm != NULL ? strchr(perm, '{') : strchr(json_buf, '{');
+        if (brace == NULL) { // not JSON we understand -- leave it alone
+            free(arr);
+            free(out);
+            return;
+        }
+        int at = (int)(brace - json_buf) + 1;
+        const char* look = json_buf + at;
+        while (*look == ' ' || *look == '\n' || *look == '\r' || *look == '\t') look++;
+        bool needs_comma = *look != '}';
+        memcpy(out, json_buf, at);
+        out[at] = '\0';
+        char insert[512];
+        if (perm != NULL) {
+            snprintf(insert, sizeof(insert), "\n    \"additionalDirectories\": ");
+        } else {
+            snprintf(insert, sizeof(insert), "\n  \"permissions\": {\n    \"additionalDirectories\": ");
+        }
+        strcat(out, insert);
+        strcat(out, arr);
+        if (perm == NULL) strcat(out, "\n  }");
+        if (needs_comma) strcat(out, ",");
+        strcat(out, json_buf + at);
+    } else {
+        snprintf(out, cap + 256, "{\n  \"permissions\": {\n    \"additionalDirectories\": ");
+        strcat(out, arr);
+        strcat(out, "\n  }\n}\n");
+    }
+
+    // Write via temp + rename so a crash can't leave a half-written file
+    char tmp[MAX_PATH];
+    if (snprintf(tmp, MAX_PATH, "%s.tmp", file) < MAX_PATH) {
+        FILE* w = fopen(tmp, "wb");
+        if (w != NULL) {
+            fwrite(out, 1, strlen(out), w);
+            fclose(w);
+            MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
+        }
+    }
+    free(arr);
+    free(out);
+}
+
+int FindMember(const char* path) {
+    for (int i = 0; i < member_count; i++) {
+        if (_stricmp(members[i], path) == 0) return i;
+    }
+    return -1;
+}
+
+void RemoveMemberAt(int index) {
+    for (int j = index; j < member_count - 1; j++) {
+        strcpy(members[j], members[j + 1]);
+    }
+    member_count--;
+    if (manifest_selected >= member_count && manifest_selected > 0) {
+        manifest_selected = member_count - 1;
+    }
+    SaveMembersTo(edit_workspace);
+}
+
+void ToggleMemberUnderCursor() {
+    if (current_directory_file_count == 0) return;
+    if (!IsDirectory(&current_directory_files[selected_row])) return;
+    char path[MAX_PATH];
+    if (!GetSelectedRowPath(selected_row, path)) return;
+
+    int i = FindMember(path);
+    if (i >= 0) {
+        RemoveMemberAt(i);
+        return;
+    }
+    if (member_count >= MAX_MEMBERS) return;
+    strcpy(members[member_count], path);
+    member_count++;
+    SaveMembersTo(edit_workspace);
+}
+
+void EnterEditMode() {
+    if (current_directory_file_count == 0) return;
+    if (!IsDirectory(&current_directory_files[selected_row])) return;
+    char* name = current_directory_files[selected_row].cFileName;
+    if (snprintf(edit_workspace, MAX_PATH, "%s\\%s", workspaces_root, name) >= MAX_PATH) return;
+    snprintf(edit_workspace_name, MAX_PATH, "%s", name);
+
+    LoadMembersFrom(edit_workspace);
+    manifest_focused = false;
+    manifest_selected = 0;
+    manifest_top = 0;
+    edit_armed = true;
+    claude_mode = CM_OFF;
+    ChangeCurrentDirectory(claude_return_dir);
+}
+
+void ExitEditMode() {
+    edit_armed = false;
+    manifest_focused = false;
+    ChangeCurrentDirectory(workspaces_root);
+    claude_mode = CM_WORKSPACES;
+}
+
+// Shift+W while browsing: add the directory under the cursor to a workspace
+// picked from a small popup, without entering claude mode at all
+void HandleQuickAdd() {
+    if (claude_mode != CM_OFF || edit_armed) return;
+    if (current_directory_file_count == 0) return;
+    if (!IsDirectory(&current_directory_files[selected_row])) return;
+    char target[MAX_PATH];
+    if (!GetSelectedRowPath(selected_row, target)) return;
+    char root[MAX_PATH];
+    if (!GetWorkspacesRoot(root)) return;
+
+    preview_path[0] = '\0'; // reusing the preview array trashes its cache
+    int total = GetFilesInDirectory(root, preview_files);
+    char names[9][MAX_PATH];
+    int count = 0;
+    for (int i = 0; i < total && count < 9; i++) {
+        if (IsDirectory(&preview_files[i])) {
+            strcpy(names[count], preview_files[i].cFileName);
+            count++;
+        }
+    }
+    if (count == 0) return; // no workspaces yet -- create one via c, a
+
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
+    int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
+    int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
+    int popup_w = 44;
+    int popup_h = count + 5;
+    if (popup_w > screen_width) popup_w = screen_width;
+    if (popup_w < 20 || screen_height < popup_h) return;
+
+    CHAR_INFO* popup = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
+    if (popup == NULL) return;
+
+    for (int i = 0; i < popup_w * popup_h; i++) {
+        popup[i].Char.UnicodeChar = L' ';
+        popup[i].Attributes = white;
+    }
+    popup[0].Char.UnicodeChar = BOX_TOP_LEFT;
+    popup[popup_w - 1].Char.UnicodeChar = BOX_TOP_RIGHT;
+    int bottom = (popup_h - 1) * popup_w;
+    popup[bottom].Char.UnicodeChar = BOX_BOTTOM_LEFT;
+    popup[bottom + popup_w - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
+    for (int c = 1; c < popup_w - 1; c++) {
+        popup[c].Char.UnicodeChar = BOX_HORIZONTAL;
+        popup[bottom + c].Char.UnicodeChar = BOX_HORIZONTAL;
+    }
+    for (int r = 1; r < popup_h - 1; r++) {
+        popup[r * popup_w].Char.UnicodeChar = BOX_VERTICAL;
+        popup[r * popup_w + popup_w - 1].Char.UnicodeChar = BOX_VERTICAL;
+    }
+    WriteToBuffer(popup, popup_w, 1, 2, "Add folder to workspace:", yellow);
+    for (int i = 0; i < count; i++) {
+        char line[64];
+        snprintf(line, sizeof(line), "[%d] %s", i + 1, names[i]);
+        WriteToBuffer(popup, popup_w, 3 + i, 2, line, white);
+    }
+
+    int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
+    int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
+    COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
+    COORD origin = { 0, 0 };
+    SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
+                          (SHORT)(start_col + popup_w - 1), (SHORT)(start_row + popup_h - 1) };
+    WriteConsoleOutputW(hAlt, popup, buffer_size, origin, &region);
+    free(popup);
+
+    while (1) {
+        INPUT_RECORD input;
+        DWORD events;
+        if (!ReadConsoleInput(hIn, &input, 1, &events)) break;
+        if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) continue;
+
+        char ch = input.Event.KeyEvent.uChar.AsciiChar;
+        if (ch >= '1' && ch < '1' + count) {
+            char anchor[MAX_PATH];
+            if (snprintf(anchor, MAX_PATH, "%s\\%s", root, names[ch - '1']) < MAX_PATH) {
+                LoadMembersFrom(anchor);
+                if (!json_too_big && FindMember(target) < 0 && member_count < MAX_MEMBERS) {
+                    strcpy(members[member_count], target);
+                    member_count++;
+                    SaveMembersTo(anchor);
+                }
+                char msg[96];
+                snprintf(msg, sizeof(msg), "Added to %s", names[ch - '1']);
+                ShowStatusBanner(msg);
+            }
+            break;
+        }
+        if (input.Event.KeyEvent.wVirtualKeyCode == VK_ESCAPE ||
+            input.Event.KeyEvent.wVirtualKeyCode == 'Q') {
+            break;
+        }
+    }
+}
+// ============================= Workspace Designer ================================
+
+// The workspace list has no parent level, so the left pane holds the
+// identity and keymap. Every line stays under the 28-column divider.
+void DrawClaudeHelpPane(CHAR_INFO* buffer, int width, int height) {
+    int row = 2;
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "A workspace is a set", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "of folders Claude", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "opens together.", gray);
+    row++;
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "l    open sessions", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "e    edit workspace", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "a    new workspace", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "y/p  duplicate", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "d    delete", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "c    back to files", gray);
+}
+
+// Third pane on the workspace list: live sessions preview for the
+// highlighted workspace
 void DrawClaudeInfoPane(CHAR_INFO* buffer, int width, int height, int divider2) {
     int col = divider2 + 2;
     if (col >= width - 8) return;
 
-    WriteToBuffer(buffer, width, 2, col, "Claude Workspaces", yellow);
-    WriteToBuffer(buffer, width, 4, col, "A workspace is a set of folders", gray);
-    WriteToBuffer(buffer, width, 5, col, "Claude Code opens together.", gray);
+    // The zero-workspace guidance lives in the workspaces column itself
+    if (current_directory_file_count == 0) return;
 
-    char count_msg[48];
-    snprintf(count_msg, sizeof(count_msg), "%d workspace(s)", current_directory_file_count);
-    WriteToBuffer(buffer, width, 7, col, count_msg, white);
+    WIN32_FIND_DATA* sel = &current_directory_files[selected_row];
+    if (!IsDirectory(sel)) return;
 
-    int row = 9;
-    if (row < height) WriteToBuffer(buffer, width, row++, col, "l      open sessions", white);
-    if (row < height) WriteToBuffer(buffer, width, row++, col, "a      new workspace", white);
-    if (row < height) WriteToBuffer(buffer, width, row++, col, "y/p    duplicate", white);
-    if (row < height) WriteToBuffer(buffer, width, row++, col, "d      delete", white);
-    if (row < height) WriteToBuffer(buffer, width, row++, col, "h/c    back to files", white);
+    char anchor[MAX_PATH];
+    if (snprintf(anchor, MAX_PATH, "%s\\%s", workspaces_root, sel->cFileName) >= MAX_PATH) return;
+    LoadSessionsFor(anchor);
+
+    char meta[64];
+    snprintf(meta, sizeof(meta), "%d session%s", session_count, session_count == 1 ? "" : "s");
+    WriteToBuffer(buffer, width, 2, col, meta, white);
+
+    if (session_count == 0) {
+        WriteToBuffer(buffer, width, 4, col, "press e to select the folders", gray);
+        WriteToBuffer(buffer, width, 5, col, "this workspace opens in Claude", gray);
+        return;
+    }
+    int rows = height - 5; // keep the last line free for the hints
+    for (int i = 0; i < rows && i < session_count; i++) {
+        char age[16];
+        FormatAge(sessions[i].mtime, age, sizeof(age));
+        char row_text[160];
+        snprintf(row_text, sizeof(row_text), "%-4s %s", age, sessions[i].title);
+        WriteToBuffer(buffer, width, 4 + i, col, row_text, white);
+    }
+
+    WriteToBuffer(buffer, width, height - 1, col, "l open  e edit  a new  d delete", gray);
+}
+
+// The pinned folder list while a workspace edit is armed: the whole design
+// stays visible as you browse and toggle
+void DrawManifestPane(CHAR_INFO* buffer, int width, int height, int divider2) {
+    int col = divider2 + 2;
+    if (col >= width - 8) return;
+
+    char title[128];
+    snprintf(title, sizeof(title), "%sediting workspace: %s",
+             manifest_focused ? "> " : "", edit_workspace_name);
+    WriteToBuffer(buffer, width, 2, col, title, yellow);
+
+    // Keymap stacked one shortcut per line, same style as the main page
+    int row = 4;
+    if (manifest_focused) {
+        if (row < height) WriteToBuffer(buffer, width, row++, col, "x      remove folder", gray);
+        if (row < height) WriteToBuffer(buffer, width, row++, col, "Enter  jump to folder", gray);
+    } else {
+        if (row < height) WriteToBuffer(buffer, width, row++, col, "Space  toggle folder", gray);
+        if (row < height) WriteToBuffer(buffer, width, row++, col, "Tab    focus this list", gray);
+        if (row < height) WriteToBuffer(buffer, width, row++, col, "Esc    done", gray);
+    }
+
+    if (json_too_big) {
+        if (9 < height) WriteToBuffer(buffer, width, 9, col, "(settings.json too large to edit)", red);
+        return;
+    }
+
+    // Count sits directly above the list it counts; rows are fixed so the
+    // list doesn't jump when the keymap swaps on focus change
+    char meta[64];
+    snprintf(meta, sizeof(meta), "%d folder%s", member_count, member_count == 1 ? "" : "s");
+    if (9 < height) WriteToBuffer(buffer, width, 9, col, meta, white);
+
+    if (member_count == 0) {
+        if (10 < height) WriteToBuffer(buffer, width, 10, col, "(Space on a directory adds it)", gray);
+        return;
+    }
+
+    int first_row = 10;
+    int rows = height - first_row;
+    if (rows < 1) return;
+    if (manifest_selected >= member_count) manifest_selected = member_count - 1;
+    if (manifest_top > manifest_selected) manifest_top = manifest_selected;
+    if (manifest_selected - manifest_top >= rows) manifest_top = manifest_selected - rows + 1;
+    if (manifest_top < 0) manifest_top = 0;
+
+    int pane_w = width - 1 - col;
+    for (int i = 0; i < rows && manifest_top + i < member_count; i++) {
+        int idx = manifest_top + i;
+        bool sel = manifest_focused && idx == manifest_selected;
+        WORD attr = white;
+        if (sel) {
+            attr = bar_background;
+            for (int c2 = divider2 + 1; c2 < width; c2++) {
+                buffer[(first_row + i) * width + c2].Attributes = bar_background;
+            }
+        }
+        // Show the tail of the path -- the deep end is the useful part
+        const char* path = members[idx];
+        int plen = (int)strlen(path);
+        char disp[MAX_PATH + 4];
+        if (plen <= pane_w) {
+            snprintf(disp, sizeof(disp), "%s", path);
+        } else if (pane_w > 3) {
+            snprintf(disp, sizeof(disp), "...%s", path + (plen - (pane_w - 3)));
+        } else {
+            disp[0] = '\0';
+        }
+        WriteToBuffer(buffer, width, first_row + i, col, disp, attr);
+    }
 }
 // ============================= Claude Workspaces =================================
 
@@ -1025,8 +1537,63 @@ int HandleInput() {
             ExitClaudeMode();
             return 1;
         }
+        if (vk == 'E') {
+            EnterEditMode();
+            return 1;
+        }
         if (vk == 'O' || vk == VK_OEM_3) {
             return 1;
+        }
+    }
+
+    // Armed workspace editing: Space toggles membership, Tab focuses the
+    // manifest list, Esc finishes; the copy/cut/paste/delete verbs are
+    // suspended so Space can only ever mean one thing here
+    if (edit_armed && claude_mode == CM_OFF) {
+        WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+        if (manifest_focused) {
+            pending_g = false;
+            if (vk == 'Q') return 0;
+            if (vk == 'J' && manifest_selected < member_count - 1) manifest_selected++;
+            else if (vk == 'K' && manifest_selected > 0) manifest_selected--;
+            else if ((vk == 'X' || vk == VK_SPACE) && member_count > 0) RemoveMemberAt(manifest_selected);
+            else if (vk == VK_RETURN && member_count > 0) {
+                // Jump the browser to this member for inspection
+                char jump[MAX_PATH];
+                strcpy(jump, members[manifest_selected]);
+                ChangeCurrentDirectory(jump);
+                manifest_focused = false;
+            }
+            else if (vk == VK_TAB || vk == VK_ESCAPE || vk == 'H') manifest_focused = false;
+            else if (vk == 'C' || vk == VK_BACK) ExitEditMode();
+            return 1;
+        }
+        if (!ctrl && !shift) {
+            if (vk == VK_ESCAPE || vk == 'C' || vk == VK_BACK) {
+                ExitEditMode(); // back to the Claude Workspaces page
+                return 1;
+            }
+            if (vk == 'L') {
+                // 'l' means "go right": with nothing to enter under the
+                // cursor, the pane to the right is the manifest
+                if (current_directory_file_count == 0 ||
+                    !IsDirectory(&current_directory_files[selected_row])) {
+                    if (member_count > 0) manifest_focused = true;
+                    return 1;
+                }
+                // on a directory it falls through and navigates as usual
+            }
+            if (vk == VK_TAB) {
+                if (member_count > 0) manifest_focused = true;
+                return 1;
+            }
+            if (vk == VK_SPACE) {
+                ToggleMemberUnderCursor();
+                return 1;
+            }
+            if (vk == 'Y' || vk == 'X' || vk == 'P' || vk == 'D') {
+                return 1; // file operations are suspended while editing
+            }
         }
     }
 
@@ -1038,6 +1605,9 @@ int HandleInput() {
         }
         else if (input.Event.KeyEvent.wVirtualKeyCode == VK_OEM_3) {
             JumpToHome(); // '~' -- same key as backtick, kept for muscle memory
+        }
+        else if (input.Event.KeyEvent.wVirtualKeyCode == 'W') {
+            HandleQuickAdd();
         }
     }
     else if (ctrl) {
