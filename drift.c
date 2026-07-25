@@ -1740,12 +1740,45 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
 
 // Locates the additionalDirectories [...] span. start/end index '[' and ']'.
 bool FindArraySpan(const char* buf, int* out_start, int* out_end) {
-    const char* key = strstr(buf, "\"additionalDirectories\"");
-    if (key == NULL) return false;
-    const char* p = strchr(key, '[');
-    if (p == NULL) return false;
-    const char* q = p + 1;
+    const char* KEY = "\"additionalDirectories\"";
+    const size_t key_len = strlen(KEY);
+
+    // Accept the key only where a key can actually appear -- outside any
+    // string, and followed by ':' then '['. A plain strstr also matches the
+    // name used as a *value*, and a plain strchr for '[' walks past a non-array
+    // value into whatever array comes next (typically permissions.allow), which
+    // SaveMembersTo would then overwrite with folder paths
+    const char* p = NULL;
     bool in_string = false;
+    for (const char* c = buf; *c != '\0'; c++) {
+        if (in_string) {
+            if (*c == '\\' && c[1] != '\0') c++;
+            else if (*c == '"') in_string = false;
+            continue;
+        }
+        if (*c != '"') continue;
+        if (strncmp(c, KEY, key_len) != 0) {
+            in_string = true; // some other string; skip to its closing quote
+            continue;
+        }
+        const char* v = c + key_len;
+        while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
+        if (*v != ':') {
+            in_string = true; // the name appearing as a value, not as a key
+            continue;
+        }
+        v++;
+        while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
+        // A key whose value is not an array is left for the caller's insert
+        // branch rather than spliced over something else
+        if (*v != '[') return false;
+        p = v;
+        break;
+    }
+    if (p == NULL) return false;
+
+    const char* q = p + 1;
+    in_string = false;
     while (*q != '\0') {
         if (in_string) {
             if (*q == '\\' && q[1] != '\0') q++;
