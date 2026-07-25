@@ -180,9 +180,7 @@ bool GetDriftDir(char* out);
 bool GetWorkspacesRoot(char* out);
 const char* AnchorFolder(const char* anchor);
 bool GetNameFile(char* out, const char* leaf);
-bool SetNameEntry(const char* leaf, const char* key, const char* name);
-void EnsureNamesMigrated();
-void MigrateLegacyNames();
+void SetNameEntry(const char* leaf, const char* key, const char* name);
 void LoadWorkspaceNames();
 bool FindArraySpan(const char* buf, int* out_start, int* out_end);
 void LoadMembersFrom(const char* anchor);
@@ -332,7 +330,6 @@ char anchor_workspace_name[MAX_PATH];
 // is held in memory rather than reopened per row. Writes drop the flag.
 char workspace_names[32768];
 bool workspace_names_loaded = false;
-bool names_migrated = false;
 
 enum MarkStatus mark_status = MARKED;
 // =========================== Global Variables ==============================
@@ -928,17 +925,17 @@ bool GetNameFile(char* out, const char* leaf) {
 // is never bounded by a buffer and a crash can't leave it half written.
 // `key` is one field for workspace names, "folder<TAB>session" for session
 // names; a row matches when the line starts with the key and a tab.
-bool SetNameEntry(const char* leaf, const char* key, const char* name) {
+void SetNameEntry(const char* leaf, const char* key, const char* name) {
     char file[MAX_PATH];
-    if (!GetNameFile(file, leaf)) return false;
+    if (!GetNameFile(file, leaf)) return;
     char tmp[MAX_PATH];
-    if (snprintf(tmp, MAX_PATH, "%s.tmp", file) >= MAX_PATH) return false;
+    if (snprintf(tmp, MAX_PATH, "%s.tmp", file) >= MAX_PATH) return;
 
     FILE* in = fopen(file, "rb");
     FILE* out = fopen(tmp, "wb");
     if (out == NULL) {
         if (in != NULL) fclose(in);
-        return false;
+        return;
     }
     size_t klen = strlen(key);
     if (in != NULL) {
@@ -952,11 +949,11 @@ bool SetNameEntry(const char* leaf, const char* key, const char* name) {
     if (name[0] != '\0') {
         fprintf(out, "%s\t%s\n", key, name);
     }
-    // A write error leaves the original untouched -- the caller can still
-    // find the row where it was, and migration keeps its sidecar
-    bool ok = fclose(out) == 0 && MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
+    // On a write error the rename simply doesn't happen and the original file
+    // survives intact -- the rename is what makes an edit visible at all
+    fclose(out);
+    MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
     workspace_names_loaded = false;
-    return ok;
 }
 
 void EnterClaudeMode() {
@@ -1179,8 +1176,6 @@ void LoadSessionsFor(const char* anchor) {
 // Drift-side session names live in .drift\session-names as tab-separated
 // "folder<TAB>id<TAB>name" lines -- claude's own files are never modified
 void ApplySessionNames(const char* anchor) {
-    EnsureNamesMigrated();
-
     char file[MAX_PATH];
     if (!GetNameFile(file, SESSION_NAMES_FILE)) return;
     FILE* f = fopen(file, "rb");
@@ -1220,8 +1215,6 @@ void SetSessionName(const char* anchor, const char* id, const char* name) {
 }
 
 void LoadWorkspaceNames() {
-    EnsureNamesMigrated();
-
     workspace_names[0] = '\0';
     workspace_names_loaded = true;
 
@@ -1258,80 +1251,6 @@ void WorkspaceDisplayName(const char* folder, char* out, size_t out_size) {
         if (eol == NULL) break;
         p = eol + 1;
     }
-}
-
-void EnsureNamesMigrated() {
-    if (names_migrated) return;
-    // Every caller runs inside claude mode, where the root is set. Returning
-    // without arming the flag means a caller that somehow arrives earlier
-    // retries later rather than skipping the migration for the whole run.
-    if (workspaces_root[0] == '\0') return;
-    names_migrated = true;
-    MigrateLegacyNames();
-}
-
-// Workspaces created before the name files kept their names inside the anchor
-// (.drift-name, .drift-titles). Fold those into .drift\ once and delete them,
-// so an anchor holds nothing of drift's -- just .claude\ and the user's own
-// notes. Only removes a sidecar after its contents have been written across.
-void MigrateLegacyNames() {
-    char pattern[MAX_PATH];
-    if (snprintf(pattern, MAX_PATH, "%s\\*", workspaces_root) >= MAX_PATH) return;
-    WIN32_FIND_DATA fd;
-    HANDLE h = FindFirstFile(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
-
-        char file[MAX_PATH];
-        if (snprintf(file, MAX_PATH, "%s\\%s\\.drift-name",
-                     workspaces_root, fd.cFileName) < MAX_PATH) {
-            FILE* f = fopen(file, "rb");
-            if (f != NULL) {
-                char line[MAX_PATH];
-                bool got = fgets(line, sizeof(line), f) != NULL;
-                fclose(f);
-                bool carried = true;
-                if (got) {
-                    size_t l = strlen(line);
-                    while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r')) {
-                        line[--l] = '\0';
-                    }
-                    if (l > 0) carried = SetNameEntry(WORKSPACE_NAMES_FILE, fd.cFileName, line);
-                }
-                if (carried) DeleteFile(file);
-            }
-        }
-
-        if (snprintf(file, MAX_PATH, "%s\\%s\\.drift-titles",
-                     workspaces_root, fd.cFileName) < MAX_PATH) {
-            FILE* f = fopen(file, "rb");
-            if (f != NULL) {
-                char line[SESSION_NAME_LEN + 64];
-                bool carried = true;
-                while (fgets(line, sizeof(line), f) != NULL) {
-                    char* tab = strchr(line, '\t');
-                    if (tab == NULL) continue;
-                    *tab = '\0';
-                    char* name = tab + 1;
-                    size_t l = strlen(name);
-                    while (l > 0 && (name[l - 1] == '\n' || name[l - 1] == '\r')) {
-                        name[--l] = '\0';
-                    }
-                    if (l == 0) continue;
-                    char key[MAX_PATH];
-                    if (snprintf(key, sizeof(key), "%s\t%s", fd.cFileName, line)
-                            < (int)sizeof(key)) {
-                        if (!SetNameEntry(SESSION_NAMES_FILE, key, name)) carried = false;
-                    }
-                }
-                fclose(f);
-                if (carried) DeleteFile(file);
-            }
-        }
-    } while (FindNextFile(h, &fd));
-    FindClose(h);
 }
 
 // Store (or, with an empty name, clear) a workspace's display-name overlay
@@ -2170,11 +2089,16 @@ void HandleQuickAdd() {
 
     preview_path[0] = '\0'; // reusing the preview array trashes its cache
     int total = GetFilesInDirectory(root, preview_files);
+    // names[] holds folder ids -- the key the anchor path is built from --
+    // while labels[] holds what the user actually calls each workspace. The
+    // ids are minted timestamps, so a popup listing them names nothing.
     char names[9][MAX_PATH];
+    char labels[9][MAX_PATH];
     int count = 0;
     for (int i = 0; i < total && count < 9; i++) {
         if (IsDirectory(&preview_files[i])) {
             strcpy(names[count], preview_files[i].cFileName);
+            WorkspaceDisplayName(names[count], labels[count], MAX_PATH);
             count++;
         }
     }
@@ -2212,7 +2136,7 @@ void HandleQuickAdd() {
     WriteToBuffer(popup, popup_w, 1, 2, "Add folder to workspace:", yellow);
     for (int i = 0; i < count; i++) {
         char line[64];
-        snprintf(line, sizeof(line), "[%d] %s", i + 1, names[i]);
+        snprintf(line, sizeof(line), "[%d] %s", i + 1, labels[i]);
         WriteToBuffer(popup, popup_w, 3 + i, 2, line, white);
     }
 
@@ -2242,7 +2166,7 @@ void HandleQuickAdd() {
                     SaveMembersTo(anchor);
                 }
                 char msg[96];
-                snprintf(msg, sizeof(msg), "Added to %s", names[ch - '1']);
+                snprintf(msg, sizeof(msg), "Added to %s", labels[ch - '1']);
                 ShowStatusBanner(msg);
             }
             break;
@@ -2431,45 +2355,57 @@ int HandleInput() {
     // Workspace list is a real directory browsed normally, with a few verbs
     // rerouted: l/Enter opens the session view instead of entering the dir,
     // h/c/Esc leave the mode, and jumps that would teleport away are inert
-    if (claude_mode == CM_WORKSPACES && !ctrl && !shift) {
+    if (claude_mode == CM_WORKSPACES) {
         WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
-        if (vk == 'L' || vk == VK_RETURN) {
-            if (current_directory_file_count > 0 &&
-                IsDirectory(&current_directory_files[selected_row])) {
-                EnterSessionsView();
-            }
+        // Checked ahead of the modifier gate below, and without consulting
+        // shift: '`' and '~' are one key (VK_OEM_3, differing only by shift),
+        // so gating this would let '~' through to JumpToHome while the mode
+        // stayed on -- leaving the list drawing the home directory as though
+        // those folders were workspaces, with every workspace verb aimed at
+        // a path under workspaces_root that does not exist. 'o' teleports by
+        // absolute path for the same reason. These two are the only keys that
+        // can move the browser out of the workspaces folder from here.
+        if (vk == VK_OEM_3 || vk == 'O') {
             return 1;
         }
-        if (vk == 'H' || vk == 'C' || vk == VK_ESCAPE) {
-            ExitClaudeMode();
-            return 1;
-        }
-        if (vk == 'E') {
-            EnterEditMode();
-            return 1;
-        }
-        if (vk == 'F') {
-            EnterAnchorMode();
-            return 1;
-        }
-        if (vk == 'R') {
-            HandleRenameWorkspace();
-            return 1;
-        }
-        if (vk == 'N') {
-            // New session in the workspace under the cursor
-            if (current_directory_file_count > 0 &&
-                IsDirectory(&current_directory_files[selected_row])) {
-                char anchor[MAX_PATH];
-                if (snprintf(anchor, MAX_PATH, "%s\\%s", workspaces_root,
-                             current_directory_files[selected_row].cFileName) < MAX_PATH) {
-                    return LaunchClaudeIn(anchor, NULL);
+        // The rest are unmodified verbs; Ctrl and Shift keys fall through to
+        // the cursor and marking handlers below
+        if (!ctrl && !shift) {
+            if (vk == 'L' || vk == VK_RETURN) {
+                if (current_directory_file_count > 0 &&
+                    IsDirectory(&current_directory_files[selected_row])) {
+                    EnterSessionsView();
                 }
+                return 1;
             }
-            return 1;
-        }
-        if (vk == 'O' || vk == VK_OEM_3) {
-            return 1;
+            if (vk == 'H' || vk == 'C' || vk == VK_ESCAPE) {
+                ExitClaudeMode();
+                return 1;
+            }
+            if (vk == 'E') {
+                EnterEditMode();
+                return 1;
+            }
+            if (vk == 'F') {
+                EnterAnchorMode();
+                return 1;
+            }
+            if (vk == 'R') {
+                HandleRenameWorkspace();
+                return 1;
+            }
+            if (vk == 'N') {
+                // New session in the workspace under the cursor
+                if (current_directory_file_count > 0 &&
+                    IsDirectory(&current_directory_files[selected_row])) {
+                    char anchor[MAX_PATH];
+                    if (snprintf(anchor, MAX_PATH, "%s\\%s", workspaces_root,
+                                 current_directory_files[selected_row].cFileName) < MAX_PATH) {
+                        return LaunchClaudeIn(anchor, NULL);
+                    }
+                }
+                return 1;
+            }
         }
     }
 
