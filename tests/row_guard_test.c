@@ -545,6 +545,59 @@ static void test_is_root_directory(void) {
            !IsRootDirectory("") && !IsRootDirectory("\\") && !IsRootDirectory("C"));
 }
 
+// ---------------------------------------------------------------------------
+// 7. UTF-8 preview detection: trailing partial-sequence trim
+// ---------------------------------------------------------------------------
+
+// Verbatim from the detection block in drift.c:LoadPreview. The read stops at
+// a fixed byte count and can land mid-character, so the bytes that could still
+// be an unfinished sequence are excluded before the buffer is validated --
+// otherwise one dangling lead byte sends the whole file to the wrong decoder.
+static int utf8_trim(const unsigned char* bytes, int len) {
+    int test = len;
+    for (int back = 1; back <= 4 && back <= test; back++) {
+        unsigned char c = bytes[test - back];
+        if (c < 0x80) break;
+        if (c >= 0xC0) {
+            int need = c >= 0xF0 ? 4 : (c >= 0xE0 ? 3 : 2);
+            if (back < need) test -= back;
+            break;
+        }
+    }
+    return test;
+}
+
+static void test_utf8_trim(void) {
+    printf("UTF-8 preview trailing-sequence trim\n");
+
+    const unsigned char ascii[] = { 'a', 'b', 'c' };
+    report("pure ASCII is never trimmed", utf8_trim(ascii, 3) == 3);
+
+    // e-acute: C3 A9
+    const unsigned char two_ok[] = { 'a', 0xC3, 0xA9 };
+    const unsigned char two_cut[] = { 'a', 0xC3 };
+    report("a complete 2-byte character is kept", utf8_trim(two_ok, 3) == 3);
+    report("a cut 2-byte character is dropped", utf8_trim(two_cut, 2) == 1);
+
+    // euro sign: E2 82 AC
+    const unsigned char three_ok[] = { 'a', 0xE2, 0x82, 0xAC };
+    const unsigned char three_cut2[] = { 'a', 0xE2, 0x82 };
+    const unsigned char three_cut1[] = { 'a', 0xE2 };
+    report("a complete 3-byte character is kept", utf8_trim(three_ok, 4) == 4);
+    report("a 3-byte character missing one byte is dropped",
+           utf8_trim(three_cut2, 3) == 1);
+    report("a 3-byte character missing two bytes is dropped",
+           utf8_trim(three_cut1, 2) == 1);
+
+    // grinning face: F0 9F 98 80
+    const unsigned char four_ok[] = { 'a', 0xF0, 0x9F, 0x98, 0x80 };
+    const unsigned char four_cut[] = { 'a', 0xF0, 0x9F, 0x98 };
+    report("a complete 4-byte character is kept", utf8_trim(four_ok, 5) == 5);
+    report("a cut 4-byte character is dropped", utf8_trim(four_cut, 4) == 1);
+
+    report("an empty buffer trims to nothing", utf8_trim(ascii, 0) == 0);
+}
+
 int main(void) {
     printf("drift regression tests\n\n");
     test_row_guards();
@@ -560,6 +613,8 @@ int main(void) {
     test_member_parse_refusals();
     printf("\n");
     test_is_root_directory();
+    printf("\n");
+    test_utf8_trim();
     printf("\n%s (%d failure%s)\n", failures == 0 ? "PASS" : "FAIL",
            failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;
