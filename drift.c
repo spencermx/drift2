@@ -1959,8 +1959,13 @@ void SaveMembersTo(const char* anchor) {
     if (f != NULL) {
         len = (int)fread(json_buf, 1, sizeof(json_buf) - 1, f);
         bool read_failed = ferror(f) != 0;
+        // json_block_reason was decided when the file was loaded; it may have
+        // grown past json_buf since. Splicing a truncated copy back would
+        // discard everything past the cut and leave the file mid-token
+        bool too_big = fgetc(f) != EOF;
         fclose(f);
-        if (read_failed) {
+        if (too_big) json_block_reason = "(settings.json too large to edit)";
+        if (read_failed || too_big) {
             free(arr);
             return;
         }
