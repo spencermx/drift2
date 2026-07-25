@@ -815,10 +815,16 @@ void LoadPreview() {
 
 void DrawContextPane(CHAR_INFO* buffer, int width, int height, int divider2) {
     char sel_path[MAX_PATH];
-    if (!GetSelectedRowPath(selected_row, sel_path)) {
+    bool have_path = GetSelectedRowPath(selected_row, sel_path);
+    if (!have_path) {
         sel_path[0] = '\0';
     }
-    if (strcmp(sel_path, preview_path) != 0) {
+    // "" means this row has no usable path, but it is also the sentinel the
+    // load/reload paths write to force a refresh, so comparing the two would
+    // match and skip the very reload that was being asked for -- leaving the
+    // previous row's preview on screen under this row's name. Never cache-hit
+    // on it; LoadPreview re-derives the path itself and reports it unreadable
+    if (!have_path || strcmp(sel_path, preview_path) != 0) {
         strcpy(preview_path, sel_path);
         LoadPreview();
     }
