@@ -1334,7 +1334,14 @@ void HandleRenameSession() {
 
     char name[MAX_PATH];
     int max_len = popup_w - 10;
-    snprintf(name, sizeof(name), "%.*s", max_len, sel->name);
+    // The field holds max_len characters but sel->name holds up to
+    // SESSION_NAME_LEN, and titles parsed from a first message routinely run
+    // longer. Keep what was shown so confirming an untouched field can be
+    // told apart from an edit, rather than saving the visible prefix over the
+    // real title
+    char prefill[MAX_PATH];
+    snprintf(prefill, sizeof(prefill), "%.*s", max_len, sel->name);
+    snprintf(name, sizeof(name), "%s", prefill);
     int pos = (int)strlen(name);
     bool cancelled = false;
 
@@ -1379,6 +1386,9 @@ void HandleRenameSession() {
     cursor_info.bVisible = FALSE;
     SetConsoleCursorInfo(hAlt, &cursor_info);
     if (cancelled) return;
+    // Nothing typed: leave the stored name alone. Emptying the field is still
+    // an edit, and still clears the override below
+    if (strcmp(name, prefill) == 0) return;
 
     SetSessionName(claude_workspace, sel->id, name);
     if (name[0] != '\0') {
