@@ -93,6 +93,11 @@
 #define CREATE_POPUP_WIDTH 50
 #define COLUMN_DIVIDER_POSITION 28
 #define MIN_WINDOW_WIDTH (COLUMN_DIVIDER_POSITION + 8)
+// Panes draw at fixed rows up to 6 (the session-detail pane's "id:" line), so
+// anything shorter cannot hold the layout. The per-site "row < height" guards
+// are what actually keeps writes in bounds; this only rules out geometry where
+// the panes would have nothing left to draw
+#define MIN_WINDOW_HEIGHT 7
 // Third (context/preview) pane appears when the window is at least this wide.
 // The current pane takes two thirds of the remaining width on narrow windows
 // but never grows past the cap -- past that, all extra width goes to the
@@ -168,7 +173,8 @@ void ToggleMemberUnderCursor();
 void EnterEditMode();
 void ExitEditMode();
 void HandleQuickAdd();
-int LaunchClaudeIn(const char* anchor, const char* args);
+int LaunchClaudeIn(const char* anchor, const char* session_id);
+bool IsSafeSessionId(const char* id);
 void ApplyTitleOverrides(const char* anchor);
 void SetTitleOverride(const char* anchor, const char* id, const char* title);
 void WorkspaceDisplayName(const char* folder, char* out, size_t out_size);
@@ -315,6 +321,13 @@ void Initialize() {
 
     // Create an alternate screen buffer
     hAlt = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE, 0, NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+    if (hAlt == INVALID_HANDLE_VALUE) {
+        // No console attached (launched detached, or from a GUI host). Every
+        // console call would fail from here on, and DrawScreen would size its
+        // frame buffer from indeterminate window dimensions
+        fprintf(stderr, "drift: no console screen buffer available\n");
+        exit(1);
+    }
     SetConsoleActiveScreenBuffer(hAlt);
 
     // The selection bar marks the current row -- the blinking hardware
@@ -341,13 +354,15 @@ void Initialize() {
 
 void DrawScreen() {
     CONSOLE_SCREEN_BUFFER_INFO info;
-    GetConsoleScreenBufferInfo(hAlt, &info);
+    if (!GetConsoleScreenBufferInfo(hAlt, &info)) {
+        return; // info is indeterminate on failure -- never size a buffer from it
+    }
     int width = info.srWindow.Right - info.srWindow.Left + 1;
     int height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
     // Window too small to draw the layout safely (header line, rule line,
     // and at least one listing row)
-    if (width < MIN_WINDOW_WIDTH || height < 3) {
+    if (width < MIN_WINDOW_WIDTH || height < MIN_WINDOW_HEIGHT) {
         return;
     }
 
@@ -655,7 +670,9 @@ void DrawScreen() {
     if (claude_mode != CM_SESSIONS && current_directory_file_count == 0) {
         if (claude_mode == CM_WORKSPACES) {
             WriteToBuffer(buffer, width, 2, COLUMN_DIVIDER_POSITION + 4, "(no workspaces yet)", gray);
-            WriteToBuffer(buffer, width, 3, COLUMN_DIVIDER_POSITION + 4, "press a to create one", gray);
+            if (3 < height) {
+                WriteToBuffer(buffer, width, 3, COLUMN_DIVIDER_POSITION + 4, "press a to create one", gray);
+            }
         } else {
             WriteToBuffer(buffer, width, 2, COLUMN_DIVIDER_POSITION + 4, "(empty)", gray);
         }
@@ -850,11 +867,27 @@ void ExitClaudeMode() {
     ChangeCurrentDirectory(claude_return_dir);
 }
 
+// A session id is the transcript's filename, so it is only as trustworthy as
+// whatever wrote into .claude\projects. Claude Code names them as uuids;
+// anything else means a hand-crafted file. This matters because the id reaches
+// a "cmd /c" command line, and '&', '^', '(' and ')' -- all command separators
+// to cmd -- are perfectly legal in Windows filenames
+bool IsSafeSessionId(const char* id) {
+    if (id[0] == '\0') return false;
+    for (const char* p = id; *p != '\0'; p++) {
+        bool ok = (*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') ||
+                  (*p >= 'A' && *p <= 'F') || *p == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 // Suspend the TUI, run claude anchored in the workspace, resume when it
 // exits. Spawned through cmd so PATH resolution finds a native claude.exe
-// and the npm claude.cmd shim alike. Returns 0 when drift should exit
-// because a wrapper script is taking over the launch (see below).
-int LaunchClaudeIn(const char* anchor, const char* args) {
+// and the npm claude.cmd shim alike. session_id NULL starts a new session.
+// Returns 0 when drift should exit because a wrapper script is taking over
+// the launch (see below).
+int LaunchClaudeIn(const char* anchor, const char* session_id) {
     // Handoff mode for Wine/dev: a Windows process can't spawn the host's
     // claude, so when DRIFT_LAUNCH_FILE is set we write the request there
     // and exit; the wrapper (run.sh) launches claude and restarts drift
@@ -863,16 +896,27 @@ int LaunchClaudeIn(const char* anchor, const char* args) {
     if (lf > 0 && lf < MAX_PATH) {
         FILE* f = fopen(launch_file, "wb");
         if (f != NULL) {
-            fprintf(f, "%s\n%s\n", anchor, args);
+            // Deliberately unquoted: run.sh word-splits this line into argv,
+            // so quotes would arrive as literal characters. IsSafeSessionId is
+            // what keeps this line benign
+            if (session_id != NULL) {
+                fprintf(f, "%s\n--resume %s\n", anchor, session_id);
+            } else {
+                fprintf(f, "%s\n\n", anchor);
+            }
             fclose(f);
             return 0; // exit drift; the wrapper takes over
         }
         return 1;
     }
 
+    // Quote the id: cmd only honors '&' and friends *outside* double quotes,
+    // and '"' itself cannot occur in a filename, so the id cannot break back out
     char command[MAX_PATH + 64];
-    if (snprintf(command, sizeof(command), "cmd /c claude%s%s",
-                 args[0] != '\0' ? " " : "", args) >= (int)sizeof(command)) {
+    int written = (session_id != NULL)
+        ? snprintf(command, sizeof(command), "cmd /c claude --resume \"%s\"", session_id)
+        : snprintf(command, sizeof(command), "cmd /c claude");
+    if (written < 0 || written >= (int)sizeof(command)) {
         return 1;
     }
 
@@ -977,6 +1021,10 @@ void LoadSessionsFor(const char* anchor) {
         snprintf(s->id, sizeof(s->id), "%s", fd.cFileName);
         char* dot = strrchr(s->id, '.');
         if (dot != NULL) *dot = '\0';
+        // Not a uuid: either a truncated over-long name or a file someone
+        // crafted to smuggle shell metacharacters into the launch. Either way
+        // it cannot be resumed, so don't list it (delete it from the browser)
+        if (!IsSafeSessionId(s->id)) continue;
         s->mtime = fd.ftLastWriteTime;
         ParseSessionTitle(s->path, s->title, sizeof(s->title));
         session_count++;
@@ -1521,14 +1569,14 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
     WriteToBuffer(buffer, width, 2, col_start, ws_disp, yellow);
     char meta[64];
     snprintf(meta, sizeof(meta), "%d session%s", session_count, session_count == 1 ? "" : "s");
-    WriteToBuffer(buffer, width, 3, col_start, meta, white);
+    if (3 < height) WriteToBuffer(buffer, width, 3, col_start, meta, white);
 
     char age[16];
     FormatAge(sel->mtime, age, sizeof(age));
     snprintf(meta, sizeof(meta), "last active: %s", age);
-    WriteToBuffer(buffer, width, 5, col_start, meta, white);
+    if (5 < height) WriteToBuffer(buffer, width, 5, col_start, meta, white);
     snprintf(meta, sizeof(meta), "id: %s", sel->id);
-    WriteToBuffer(buffer, width, 6, col_start, meta, gray);
+    if (6 < height) WriteToBuffer(buffer, width, 6, col_start, meta, gray);
 
     // First prompt, wrapped to the pane
     int pane_w = width - 1 - col_start;
@@ -1952,8 +2000,8 @@ void DrawClaudeInfoPane(CHAR_INFO* buffer, int width, int height, int divider2) 
     WriteToBuffer(buffer, width, 2, col, meta, white);
 
     if (session_count == 0) {
-        WriteToBuffer(buffer, width, 4, col, "press e to select the folders", gray);
-        WriteToBuffer(buffer, width, 5, col, "this workspace opens in Claude", gray);
+        if (4 < height) WriteToBuffer(buffer, width, 4, col, "press e to select the folders", gray);
+        if (5 < height) WriteToBuffer(buffer, width, 5, col, "this workspace opens in Claude", gray);
         return;
     }
     int rows = height - 5; // keep the last line free for the hints
@@ -2072,11 +2120,9 @@ int HandleInput() {
         } else if (vk == 'C') {
             ExitClaudeMode();
         } else if ((vk == VK_RETURN || vk == 'L') && session_count > 0) {
-            char args[80];
-            snprintf(args, sizeof(args), "--resume %s", sessions[session_selected].id);
-            return LaunchClaudeIn(claude_workspace, args);
+            return LaunchClaudeIn(claude_workspace, sessions[session_selected].id);
         } else if (vk == 'N') {
-            return LaunchClaudeIn(claude_workspace, "");
+            return LaunchClaudeIn(claude_workspace, NULL);
         } else if (vk == 'R') {
             HandleRenameSession();
         } else if (vk == 'D') {
@@ -2116,7 +2162,7 @@ int HandleInput() {
                 char anchor[MAX_PATH];
                 if (snprintf(anchor, MAX_PATH, "%s\\%s", workspaces_root,
                              current_directory_files[selected_row].cFileName) < MAX_PATH) {
-                    return LaunchClaudeIn(anchor, "");
+                    return LaunchClaudeIn(anchor, NULL);
                 }
             }
             return 1;
@@ -2697,7 +2743,7 @@ void ConfirmDelete() {
     if (marked_files_count == 0) return;
 
     CONSOLE_SCREEN_BUFFER_INFO info;
-    GetConsoleScreenBufferInfo(hAlt, &info);
+    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
     int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
     int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
@@ -2936,7 +2982,7 @@ void HandleCreate() {
     int popup_h = 3;
 
     CONSOLE_SCREEN_BUFFER_INFO info;
-    GetConsoleScreenBufferInfo(hAlt, &info);
+    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
     int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
     int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
@@ -3148,7 +3194,7 @@ void HandleOldHistory() {
     int display_count = history_count < 10 ? history_count : 10;
 
     CONSOLE_SCREEN_BUFFER_INFO info;
-    GetConsoleScreenBufferInfo(hAlt, &info);
+    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
     int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
     int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
