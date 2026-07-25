@@ -1342,10 +1342,8 @@ bool WorkspaceNameTaken(const char* name, const char* except_folder) {
     return taken;
 }
 
-// Report a rejected name and wait for a keypress -- ShowStatusBanner alone is
-// wiped by the next redraw, so it needs an explicit acknowledgement to be seen
-// The banner is painted once and the next DrawScreen would wipe it, so hold
-// the frame until the user acknowledges it
+// Report something and wait for a keypress: the banner is painted once and the
+// next DrawScreen wipes it, so it needs an acknowledgement to be seen at all
 void NotifyAndWait(const char* text) {
     ShowStatusBanner(text);
     INPUT_RECORD ir;
@@ -1378,13 +1376,15 @@ void HandleRenameSession() {
     if (popup_w > screen_width - 2) popup_w = screen_width - 2;
     if (popup_w < 14 || screen_height < popup_h) return;
 
-    int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
-    int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
-
-    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
+    // Allocated at the maximum width, so a resize only has to recompute the
+    // geometry inside the loop and never reallocate: popup_w is
+    // CREATE_POPUP_WIDTH clamped down to the screen, never above it
+    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(CREATE_POPUP_WIDTH * popup_h * sizeof(CHAR_INFO));
     if (popup_buffer == NULL) return;
 
     char name[MAX_PATH];
+    // Fixed for the life of the popup even if the window is resized, so text
+    // already typed can never exceed what the field still accepts
     int max_len = popup_w - 10;
     // The field holds max_len characters but sel->name holds up to
     // SESSION_NAME_LEN, and titles parsed from a first message routinely run
@@ -1401,6 +1401,25 @@ void HandleRenameSession() {
     SetConsoleCursorInfo(hAlt, &cursor_info);
 
     while (1) {
+        // Re-measured every pass rather than once before the loop: the console
+        // reflows on a resize, and drawing at the original geometry would put
+        // the field and its caret somewhere other than where they appear
+        CONSOLE_SCREEN_BUFFER_INFO cur;
+        if (!GetConsoleScreenBufferInfo(hAlt, &cur)) {
+            cancelled = true;
+            break;
+        }
+        int cur_w = cur.srWindow.Right - cur.srWindow.Left + 1;
+        int cur_h = cur.srWindow.Bottom - cur.srWindow.Top + 1;
+        popup_w = CREATE_POPUP_WIDTH;
+        if (popup_w > cur_w - 2) popup_w = cur_w - 2;
+        if (popup_w < 14 || cur_h < popup_h) {
+            cancelled = true; // shrunk too far to show the field
+            break;
+        }
+        int start_col = cur.srWindow.Left + (cur_w - popup_w) / 2;
+        int start_row = cur.srWindow.Top + (cur_h - popup_h) / 2;
+
         DrawCreatePopup(popup_w, name, NULL, popup_buffer);
         COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
         COORD origin = { 0, 0 };
@@ -1415,6 +1434,10 @@ void HandleRenameSession() {
         if (!ReadConsoleInput(hIn, &input, 1, &events)) {
             cancelled = true;
             break;
+        }
+        if (input.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            DrawScreen(); // restore what the popup sits on top of
+            continue;     // the loop re-measures and repaints above
         }
         if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) continue;
 
@@ -1471,13 +1494,15 @@ void HandleRenameWorkspace() {
     if (popup_w > screen_width - 2) popup_w = screen_width - 2;
     if (popup_w < 14 || screen_height < popup_h) return;
 
-    int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
-    int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
-
-    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
+    // Allocated at the maximum width, so a resize only has to recompute the
+    // geometry inside the loop and never reallocate: popup_w is
+    // CREATE_POPUP_WIDTH clamped down to the screen, never above it
+    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(CREATE_POPUP_WIDTH * popup_h * sizeof(CHAR_INFO));
     if (popup_buffer == NULL) return;
 
     char name[MAX_PATH];
+    // Fixed for the life of the popup even if the window is resized, so text
+    // already typed can never exceed what the field still accepts
     int max_len = popup_w - 10;
     char current[MAX_PATH];
     WorkspaceDisplayName(folder, current, sizeof(current));
@@ -1489,6 +1514,25 @@ void HandleRenameWorkspace() {
     SetConsoleCursorInfo(hAlt, &cursor_info);
 
     while (1) {
+        // Re-measured every pass rather than once before the loop: the console
+        // reflows on a resize, and drawing at the original geometry would put
+        // the field and its caret somewhere other than where they appear
+        CONSOLE_SCREEN_BUFFER_INFO cur;
+        if (!GetConsoleScreenBufferInfo(hAlt, &cur)) {
+            cancelled = true;
+            break;
+        }
+        int cur_w = cur.srWindow.Right - cur.srWindow.Left + 1;
+        int cur_h = cur.srWindow.Bottom - cur.srWindow.Top + 1;
+        popup_w = CREATE_POPUP_WIDTH;
+        if (popup_w > cur_w - 2) popup_w = cur_w - 2;
+        if (popup_w < 14 || cur_h < popup_h) {
+            cancelled = true; // shrunk too far to show the field
+            break;
+        }
+        int start_col = cur.srWindow.Left + (cur_w - popup_w) / 2;
+        int start_row = cur.srWindow.Top + (cur_h - popup_h) / 2;
+
         DrawCreatePopup(popup_w, name, NULL, popup_buffer);
         COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
         COORD origin = { 0, 0 };
@@ -1503,6 +1547,10 @@ void HandleRenameWorkspace() {
         if (!ReadConsoleInput(hIn, &input, 1, &events)) {
             cancelled = true;
             break;
+        }
+        if (input.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            DrawScreen(); // restore what the popup sits on top of
+            continue;     // the loop re-measures and repaints above
         }
         if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) continue;
 
@@ -3546,17 +3594,42 @@ void HandleCreate() {
     if (popup_w > screen_width - 2) popup_w = screen_width - 2;
     if (popup_w < 14 || screen_height < popup_h) return;
 
-    int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
-    int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
-
-    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
+    // Allocated at the maximum width, so a resize only has to recompute the
+    // geometry inside the loop and never reallocate: popup_w is
+    // CREATE_POPUP_WIDTH clamped down to the screen, never above it
+    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(CREATE_POPUP_WIDTH * popup_h * sizeof(CHAR_INFO));
     if (popup_buffer == NULL) return;
+
+    // Fixed for the life of the popup even if the window is resized, so text
+    // already typed can never exceed what the field still accepts
+    int max_len = popup_w - 10;
 
     // Show the hardware cursor while typing in the name field
     CONSOLE_CURSOR_INFO cursor_info = { 25, TRUE };
     SetConsoleCursorInfo(hAlt, &cursor_info);
 
     while (1) {
+        // Re-measured every pass rather than once before the loop: the console
+        // reflows on a resize, and drawing at the original geometry would put
+        // the field and its caret somewhere other than where they appear
+        CONSOLE_SCREEN_BUFFER_INFO cur;
+        if (!GetConsoleScreenBufferInfo(hAlt, &cur)) {
+            name[0] = '\0';
+            cancelled = true;
+            break;
+        }
+        int cur_w = cur.srWindow.Right - cur.srWindow.Left + 1;
+        int cur_h = cur.srWindow.Bottom - cur.srWindow.Top + 1;
+        popup_w = CREATE_POPUP_WIDTH;
+        if (popup_w > cur_w - 2) popup_w = cur_w - 2;
+        if (popup_w < 14 || cur_h < popup_h) {
+            name[0] = '\0'; // shrunk too far to show the field -- cancel
+            cancelled = true;
+            break;
+        }
+        int start_col = cur.srWindow.Left + (cur_w - popup_w) / 2;
+        int start_row = cur.srWindow.Top + (cur_h - popup_h) / 2;
+
         // Draw popup
         DrawCreatePopup(popup_w, name, ph, popup_buffer);
 
@@ -3579,6 +3652,11 @@ void HandleCreate() {
             break;          // "create with the partial name"
         }
 
+        if (input.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            DrawScreen(); // restore what the popup sits on top of
+            continue;     // the loop re-measures and repaints above
+        }
+
         if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) {
             continue;
         }
@@ -3595,7 +3673,7 @@ void HandleCreate() {
         } else if (vk == VK_BACK && pos > 0) {
             pos--;
             name[pos] = '\0';
-        } else if (c >= 32 && c < 127 && pos < popup_w - 10) {
+        } else if (c >= 32 && c < 127 && pos < max_len) {
             name[pos] = c;
             pos++;
             name[pos] = '\0';
@@ -3784,39 +3862,51 @@ void HandleOldHistory() {
 
     int display_count = history_count < 10 ? history_count : 10;
 
-    CONSOLE_SCREEN_BUFFER_INFO info;
-    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
-    int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
-    int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
-
-    int popup_height = display_count + 5;
-    int popup_width = 60;
-    if (popup_width > screen_width) popup_width = screen_width;
-    if (popup_width < 10 || screen_height < popup_height) return;
-
-    // Create popup buffer
-    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(popup_width * popup_height * sizeof(CHAR_INFO));
-    if (popup_buffer == NULL) return;
-    DrawOldHistoryPopup(popup_width, popup_height, distances, display_count, popup_buffer);
-
-    // Center the popup on screen
-    int start_col = info.srWindow.Left + (screen_width - popup_width) / 2;
-    int start_row = info.srWindow.Top + (screen_height - popup_height) / 2;
-
-    COORD buffer_size = { (SHORT)popup_width, (SHORT)popup_height };
-    COORD origin = { 0, 0 };
-    SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
-                          (SHORT)(start_col + popup_width - 1), (SHORT)(start_row + popup_height - 1) };
-    WriteConsoleOutputW(hAlt, popup_buffer, buffer_size, origin, &region);
-
-    free(popup_buffer);
-
-    // Wait for input
+    // Painted from inside the loop so a resize can repaint it: the console
+    // reflows and wipes the popup, and the number keys stay live behind it
+    bool repaint = true;
     while (1) {
+        if (repaint) {
+            CONSOLE_SCREEN_BUFFER_INFO info;
+            if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
+            int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
+            int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
+
+            int popup_height = display_count + 5;
+            int popup_width = 60;
+            if (popup_width > screen_width) popup_width = screen_width;
+            // Shrunk too far to show the list: cancel rather than leave the
+            // number keys live behind nothing
+            if (popup_width < 10 || screen_height < popup_height) return;
+
+            CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(popup_width * popup_height * sizeof(CHAR_INFO));
+            if (popup_buffer == NULL) return;
+            DrawOldHistoryPopup(popup_width, popup_height, distances, display_count, popup_buffer);
+
+            // Center the popup on screen
+            int start_col = info.srWindow.Left + (screen_width - popup_width) / 2;
+            int start_row = info.srWindow.Top + (screen_height - popup_height) / 2;
+
+            COORD buffer_size = { (SHORT)popup_width, (SHORT)popup_height };
+            COORD origin = { 0, 0 };
+            SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
+                                  (SHORT)(start_col + popup_width - 1), (SHORT)(start_row + popup_height - 1) };
+            WriteConsoleOutputW(hAlt, popup_buffer, buffer_size, origin, &region);
+
+            free(popup_buffer);
+            repaint = false;
+        }
+
         INPUT_RECORD input;
         DWORD events;
         if (!ReadConsoleInput(hIn, &input, 1, &events)) {
             break; // Treat console failure as cancel
+        }
+
+        if (input.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            DrawScreen(); // restore what the popup sits on top of
+            repaint = true;
+            continue;
         }
 
         if (input.EventType == KEY_EVENT && input.Event.KeyEvent.bKeyDown) {
