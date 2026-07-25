@@ -316,7 +316,10 @@ bool manifest_focused = false;
 int manifest_selected = 0;
 int manifest_top = 0;
 char json_buf[65536];
-bool json_too_big = false; // refuse edits rather than corrupt a huge file
+// Non-NULL when settings.json holds something that cannot be rewritten without
+// losing information. Edits are refused rather than made lossy, and the string
+// is what the manifest pane shows, so it carries the reason and its own parens
+const char* json_block_reason = NULL;
 char sessions_loaded_for[MAX_PATH]; // cache key for the sessions[] array
 
 // Browsing a workspace's own anchor directory. Ordinary file browsing pinned
@@ -1798,7 +1801,7 @@ bool FindArraySpan(const char* buf, int* out_start, int* out_end) {
 
 void LoadMembersFrom(const char* anchor) {
     member_count = 0;
-    json_too_big = false;
+    json_block_reason = NULL;
 
     // Under the Wine wrapper, entries are stored host-style ("/Users/...")
     // so the host claude can read them; internally we use the drive form
@@ -1815,7 +1818,8 @@ void LoadMembersFrom(const char* anchor) {
     fclose(f);
     json_buf[len] = '\0';
     if (extra != EOF) {
-        json_too_big = true; // a partial parse could corrupt the file on save
+        // A partial parse could corrupt the file on save
+        json_block_reason = "(settings.json too large to edit)";
         return;
     }
 
@@ -1879,7 +1883,7 @@ size_t AppendFmt(char* buf, size_t n, size_t cap, const char* fmt, ...) {
 }
 
 void SaveMembersTo(const char* anchor) {
-    if (json_too_big) return;
+    if (json_block_reason != NULL) return;
 
     char dir[MAX_PATH];
     if (snprintf(dir, MAX_PATH, "%s\\.claude", anchor) >= MAX_PATH) return;
@@ -2220,7 +2224,7 @@ void HandleQuickAdd() {
             char anchor[MAX_PATH];
             if (snprintf(anchor, MAX_PATH, "%s\\%s", root, names[ch - '1']) < MAX_PATH) {
                 LoadMembersFrom(anchor);
-                if (!json_too_big && FindMember(target) < 0 && member_count < MAX_MEMBERS) {
+                if (json_block_reason == NULL && FindMember(target) < 0 && member_count < MAX_MEMBERS) {
                     strcpy(members[member_count], target);
                     member_count++;
                     SaveMembersTo(anchor);
@@ -2319,8 +2323,8 @@ void DrawManifestPane(CHAR_INFO* buffer, int width, int height, int divider2) {
         if (row < height) WriteToBuffer(buffer, width, row++, col, "Esc    done", gray);
     }
 
-    if (json_too_big) {
-        if (9 < height) WriteToBuffer(buffer, width, 9, col, "(settings.json too large to edit)", red);
+    if (json_block_reason != NULL) {
+        if (9 < height) WriteToBuffer(buffer, width, 9, col, json_block_reason, red);
         return;
     }
 
