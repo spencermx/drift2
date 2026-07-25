@@ -1188,12 +1188,16 @@ void LoadSessionsFor(const char* anchor) {
 
         SessionEntry* s = &sessions[session_count];
         if (snprintf(s->path, MAX_PATH, "%s\\%s", dir, fd.cFileName) >= MAX_PATH) continue;
-        snprintf(s->id, sizeof(s->id), "%s", fd.cFileName);
+        // A name too long for the field would keep only its first 47 bytes,
+        // and losing the ".jsonl" that way leaves something the check below
+        // still reads as a valid id -- hex and dashes, any length -- so the
+        // row would be listed and resumed against an id that does not exist
+        if (snprintf(s->id, sizeof(s->id), "%s", fd.cFileName) >= (int)sizeof(s->id)) continue;
         char* dot = strrchr(s->id, '.');
         if (dot != NULL) *dot = '\0';
-        // Not a uuid: either a truncated over-long name or a file someone
-        // crafted to smuggle shell metacharacters into the launch. Either way
-        // it cannot be resumed, so don't list it (delete it from the browser)
+        // Not a uuid: a file someone crafted to smuggle shell metacharacters
+        // into the launch. It cannot be resumed, so don't list it (delete it
+        // from the browser)
         if (!IsSafeSessionId(s->id)) continue;
         s->mtime = fd.ftLastWriteTime;
         ReadSessionName(s->path, s->name, sizeof(s->name));
