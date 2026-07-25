@@ -1865,6 +1865,18 @@ void LoadMembersFrom(const char* anchor) {
         while (p < stop && *p != '"') p++; // resync if the copy was truncated
         if (p < stop) p++;
     }
+
+    // Stopping on the array bound rather than the end of the span leaves
+    // entries unread, and a save rewrites the whole span from what was read --
+    // silently deleting every entry past the last one that fit
+    if (member_count == MAX_MEMBERS) {
+        for (const char* q = p; q < stop; q++) {
+            if (*q == '"') {
+                json_block_reason = "(too many folders to edit safely)";
+                break;
+            }
+        }
+    }
 }
 
 // Bounded append. snprintf returns the length it *would* have written, so the
