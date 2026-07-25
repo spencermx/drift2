@@ -176,6 +176,7 @@ void EnterEditMode();
 void ExitEditMode();
 void HandleQuickAdd();
 int LaunchClaudeIn(const char* anchor, const char* session_id);
+void ScrollOriginalScreen();
 bool IsSafeSessionId(const char* id);
 void ApplyTitleOverrides(const char* anchor);
 void SetTitleOverride(const char* anchor, const char* id, const char* title);
@@ -889,6 +890,39 @@ bool IsSafeSessionId(const char* id) {
     return true;
 }
 
+// Push whatever the shell left on screen up out of the viewport, so a program
+// launched out of drift starts at the top of a blank one instead of partway
+// down. Newlines rather than a clear: the old output stays intact and
+// scrollable. One newline per visible row is exactly the amount needed --
+// reaching the bottom row costs the rows below the cursor, and the rows at
+// and above it then scroll off one apiece, so only real content crosses the
+// top edge and no blank filler lands in the scrollback ahead of it.
+void ScrollOriginalScreen() {
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (!GetConsoleScreenBufferInfo(hOriginal, &info)) {
+        return;
+    }
+    int remaining = info.srWindow.Bottom - info.srWindow.Top + 1;
+
+    char newlines[128];
+    while (remaining > 0) {
+        int chunk = remaining < (int)sizeof(newlines) ? remaining : (int)sizeof(newlines);
+        memset(newlines, '\n', (size_t)chunk);
+        DWORD written;
+        if (!WriteConsole(hOriginal, newlines, (DWORD)chunk, &written, NULL)) {
+            return;
+        }
+        remaining -= chunk;
+    }
+
+    // The viewport has moved down the buffer (or the buffer scrolled under
+    // it), so re-read it to find where the now-blank screen begins
+    if (GetConsoleScreenBufferInfo(hOriginal, &info)) {
+        COORD top = {0, info.srWindow.Top};
+        SetConsoleCursorPosition(hOriginal, top);
+    }
+}
+
 // Suspend the TUI, run claude anchored in the workspace, resume when it
 // exits. Spawned through cmd so PATH resolution finds a native claude.exe
 // and the npm claude.cmd shim alike. session_id NULL starts a new session.
@@ -929,6 +963,7 @@ int LaunchClaudeIn(const char* anchor, const char* session_id) {
 
     SetConsoleActiveScreenBuffer(hOriginal);
     SetConsoleMode(hIn, original_console_mode);
+    ScrollOriginalScreen();
 
     STARTUPINFO si = {0};
     si.cb = sizeof(si);
