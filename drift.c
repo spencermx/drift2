@@ -2445,6 +2445,13 @@ int HandleInput() {
     if (claude_mode == CM_SESSIONS) {
         pending_g = false;
         WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+        // This view binds no Ctrl chords, but it tested the key code alone, so
+        // the ones bound elsewhere landed on whatever shared the letter:
+        // Ctrl+D (half-page down everywhere else) raised the delete prompt,
+        // Ctrl+N launched claude, Ctrl+C left the mode and Ctrl+Q quit drift.
+        // ENABLE_PROCESSED_INPUT is off, so Ctrl+C arrives as a key event, and
+        // AltGr on non-US layouts reports as Ctrl too
+        if (ctrl) return 1;
         if (vk == 'Q') {
             return 0;
         } else if (vk == 'J' && session_selected < session_count - 1) {
