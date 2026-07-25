@@ -1667,8 +1667,8 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
 
     // Left pane: workspace list in the normal drift folder color, the open
     // one in white so it still stands out
-    for (int i = 0; i < list_height && i < current_directory_file_count; i++) {
-        WIN32_FIND_DATA* w = &current_directory_files[i];
+    for (int i = 0; i < list_height && top_row + i < current_directory_file_count; i++) {
+        WIN32_FIND_DATA* w = &current_directory_files[top_row + i];
         WORD c = strcmp(w->cFileName, claude_workspace_name) == 0 ? white : blue;
         if (!IsDirectory(w)) c = gray;
         if (IsDirectory(w)) {
