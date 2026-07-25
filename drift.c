@@ -1839,6 +1839,10 @@ void LoadMembersFrom(const char* anchor) {
             if (*p == '\\' && p + 1 < stop) {
                 p++;
                 if (*p == 'u') {
+                    // '?' stands in for display only. Saving would write that
+                    // '?' back as the real path, so an entry drift never
+                    // touched is replaced by one that cannot exist
+                    json_block_reason = "(unsupported \\u escape in settings)";
                     out[n++] = '?';
                     p++;
                     for (int k = 0; k < 4 && p < stop; k++) p++;
