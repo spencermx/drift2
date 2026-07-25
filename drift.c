@@ -197,7 +197,7 @@ void LoadParentDirectory();
 void LoadCurrentDirectory();
 void ReloadCurrentDirectory();
 void ClearMarkedFiles();
-void DrawCreatePopup(int width, char* input_text, CHAR_INFO* out_buffer);
+void DrawCreatePopup(int width, char* input_text, const char* placeholder, CHAR_INFO* out_buffer);
 void ShowStatusBanner(const char* text);
 void HandleCreate();
 void HandleMarkOperation(enum MarkStatus new_status);
@@ -1049,7 +1049,7 @@ void HandleRenameSession() {
     SetConsoleCursorInfo(hAlt, &cursor_info);
 
     while (1) {
-        DrawCreatePopup(popup_w, name, popup_buffer);
+        DrawCreatePopup(popup_w, name, NULL, popup_buffer);
         COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
         COORD origin = { 0, 0 };
         SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
@@ -2616,7 +2616,7 @@ void DrawDeletePopup(int width, int height, CHAR_INFO* out_buffer) {
     WriteToBuffer(out_buffer, width, height - 3, 2, "[N] No - Cancel", white);
 }
 
-void DrawCreatePopup(int width, char* input_text, CHAR_INFO* out_buffer) {
+void DrawCreatePopup(int width, char* input_text, const char* placeholder, CHAR_INFO* out_buffer) {
     int height = 3;
 
     // Fill background
@@ -2644,9 +2644,14 @@ void DrawCreatePopup(int width, char* input_text, CHAR_INFO* out_buffer) {
     }
     out_buffer[bottom + width - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
 
-    // Label and input
+    // Label and input. When the field is empty and a placeholder was given,
+    // show it greyed out -- pressing Enter accepts it as the default name
     WriteToBuffer(out_buffer, width, 1, 2, "Name: ", white);
-    WriteToBuffer(out_buffer, width, 1, 8, input_text, white);
+    if (input_text[0] == '\0' && placeholder != NULL) {
+        WriteToBuffer(out_buffer, width, 1, 8, placeholder, gray);
+    } else {
+        WriteToBuffer(out_buffer, width, 1, 8, input_text, white);
+    }
 }
 
 // Paint a small centered banner right before a blocking shell operation so
@@ -2701,6 +2706,19 @@ void HandleCreate() {
     char name[MAX_PATH];
     name[0] = '\0';
     int pos = 0;
+    bool cancelled = false;
+
+    // New workspaces get a greyed-out date-time default so Enter alone names
+    // one without typing; colons are omitted since they're illegal in a path
+    char placeholder[MAX_PATH];
+    const char* ph = NULL;
+    if (claude_mode == CM_WORKSPACES) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        snprintf(placeholder, sizeof(placeholder), "%04d-%02d-%02d_%02d-%02d-%02d",
+                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        ph = placeholder;
+    }
 
     int popup_h = 3;
 
@@ -2725,7 +2743,7 @@ void HandleCreate() {
 
     while (1) {
         // Draw popup
-        DrawCreatePopup(popup_w, name, popup_buffer);
+        DrawCreatePopup(popup_w, name, ph, popup_buffer);
 
         COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
         COORD origin = { 0, 0 };
@@ -2742,6 +2760,7 @@ void HandleCreate() {
         DWORD events;
         if (!ReadConsoleInput(hIn, &input, 1, &events)) {
             name[0] = '\0'; // Treat console failure as cancel, not as
+            cancelled = true;
             break;          // "create with the partial name"
         }
 
@@ -2756,6 +2775,7 @@ void HandleCreate() {
             break;
         } else if (vk == VK_ESCAPE) {
             name[0] = '\0';
+            cancelled = true;
             break;
         } else if (vk == VK_BACK && pos > 0) {
             pos--;
@@ -2771,6 +2791,11 @@ void HandleCreate() {
 
     cursor_info.bVisible = FALSE;
     SetConsoleCursorInfo(hAlt, &cursor_info);
+
+    // Enter on an empty field accepts the greyed date-time default
+    if (!cancelled && name[0] == '\0' && ph != NULL) {
+        snprintf(name, sizeof(name), "%s", placeholder);
+    }
 
     if (name[0] == '\0') return;
 
@@ -2984,9 +3009,17 @@ void Cleanup() {
         char temp_path[MAX_PATH];
         snprintf(temp_path, MAX_PATH, "%s\\browser_lastdir.txt", temp);
 
+        // In a claude mode the process cwd is the workspaces root, not where
+        // the user was browsing. Quitting straight from the workspace/session
+        // view never unwinds it (ExitClaudeMode does, on H/C/Esc), so persist
+        // the saved return directory instead -- otherwise the cd-on-quit
+        // wrapper strands the shell in .drift\workspaces
+        const char* final_dir = (claude_mode != CM_OFF) ? claude_return_dir
+                                                         : current_directory;
+
         FILE* f = fopen(temp_path, "w");
         if (f) {
-            fprintf(f, "%s", current_directory);
+            fprintf(f, "%s", final_dir);
             fclose(f);
         }
     }
