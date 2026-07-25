@@ -36,6 +36,9 @@
 //              Tab focuses that list (x removes, Enter jumps the browser
 //              there), Esc finishes. Folder membership is written to the
 //              workspace's .claude\settings.json additionalDirectories.
+// - R        : (in the workspace list) rename a workspace's drift display
+//              name (stored in <anchor>\.drift-name); the folder itself is
+//              never renamed, so its sessions stay associated
 // - Shift+W  : (while browsing) add the directory under the cursor to a
 //              workspace picked from a popup
 // - Enter/L  : (session list) resume the session in claude, anchored in the
@@ -168,6 +171,11 @@ void HandleQuickAdd();
 int LaunchClaudeIn(const char* anchor, const char* args);
 void ApplyTitleOverrides(const char* anchor);
 void SetTitleOverride(const char* anchor, const char* id, const char* title);
+void WorkspaceDisplayName(const char* folder, char* out, size_t out_size);
+void SetWorkspaceName(const char* folder, const char* display);
+bool WorkspaceNameTaken(const char* name, const char* except_folder);
+void NotifyNameTaken(const char* name);
+void HandleRenameWorkspace();
 void HandleRenameSession();
 void HandleDeleteSession();
 void DrawManifestPane(CHAR_INFO* buffer, int width, int height, int divider2);
@@ -573,7 +581,15 @@ void DrawScreen() {
             }
         }
 
-        AnsiToWide(current_directory_files[file_index].cFileName, wname, MAX_PATH);
+        // In the workspace list, show the drift-side display name (folders
+        // themselves are never renamed, so their sessions stay associated)
+        if (claude_mode == CM_WORKSPACES && IsDirectory(&current_directory_files[file_index])) {
+            char disp[MAX_PATH];
+            WorkspaceDisplayName(current_directory_files[file_index].cFileName, disp, sizeof(disp));
+            AnsiToWide(disp, wname, MAX_PATH);
+        } else {
+            AnsiToWide(current_directory_files[file_index].cFileName, wname, MAX_PATH);
+        }
         int len = (int)wcslen(wname);
 
         for (int col = 0; col < len && col + COLUMN_DIVIDER_POSITION + 4 < divider2; col++) {
@@ -1034,6 +1050,83 @@ void SetTitleOverride(const char* anchor, const char* id, const char* title) {
     MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
 }
 
+// A workspace's shown name: the contents of <anchor>\.drift-name if present,
+// otherwise the folder name itself. The folder is never renamed -- that path
+// is the key Claude files its sessions under, so renaming it would orphan
+// them -- so this display name is a pure drift-side overlay, exactly like the
+// session titles above.
+void WorkspaceDisplayName(const char* folder, char* out, size_t out_size) {
+    snprintf(out, out_size, "%s", folder); // default: the folder name
+    char file[MAX_PATH];
+    if (snprintf(file, MAX_PATH, "%s\\%s\\.drift-name", workspaces_root, folder) >= MAX_PATH) return;
+    FILE* f = fopen(file, "rb");
+    if (f == NULL) return;
+    char line[MAX_PATH];
+    if (fgets(line, sizeof(line), f) != NULL) {
+        size_t l = strlen(line);
+        while (l > 0 && (line[l - 1] == '\n' || line[l - 1] == '\r')) line[--l] = '\0';
+        if (l > 0) snprintf(out, out_size, "%s", line);
+    }
+    fclose(f);
+}
+
+// Store (or, with an empty name, clear) a workspace's display-name overlay
+void SetWorkspaceName(const char* folder, const char* display) {
+    char file[MAX_PATH];
+    if (snprintf(file, MAX_PATH, "%s\\%s\\.drift-name", workspaces_root, folder) >= MAX_PATH) return;
+    if (display[0] == '\0') {
+        DeleteFile(file); // revert to the folder name
+        return;
+    }
+    char tmp[MAX_PATH];
+    if (snprintf(tmp, MAX_PATH, "%s.tmp", file) >= MAX_PATH) return;
+    FILE* f = fopen(tmp, "wb");
+    if (f == NULL) return;
+    fprintf(f, "%s\n", display);
+    fclose(f);
+    MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
+}
+
+// True if some workspace other than except_folder already presents `name` as
+// its effective (shown) name -- overlay or folder name alike. Because folder
+// ids are opaque and always unique, the shown name is the only namespace the
+// user touches, so this single check catches every collision they could see.
+// Case-insensitive, to match the Windows filesystem.
+bool WorkspaceNameTaken(const char* name, const char* except_folder) {
+    char pattern[MAX_PATH];
+    if (snprintf(pattern, MAX_PATH, "%s\\*", workspaces_root) >= MAX_PATH) return false;
+    WIN32_FIND_DATA fd;
+    HANDLE h = FindFirstFile(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool taken = false;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        if (except_folder != NULL && _stricmp(fd.cFileName, except_folder) == 0) continue;
+        char disp[MAX_PATH];
+        WorkspaceDisplayName(fd.cFileName, disp, sizeof(disp));
+        if (_stricmp(disp, name) == 0) {
+            taken = true;
+            break;
+        }
+    } while (FindNextFile(h, &fd));
+    FindClose(h);
+    return taken;
+}
+
+// Report a rejected name and wait for a keypress -- ShowStatusBanner alone is
+// wiped by the next redraw, so it needs an explicit acknowledgement to be seen
+void NotifyNameTaken(const char* name) {
+    char msg[160];
+    snprintf(msg, sizeof(msg), "\"%s\" is already in use -- press a key", name);
+    ShowStatusBanner(msg);
+    INPUT_RECORD ir;
+    DWORD ev;
+    while (ReadConsoleInput(hIn, &ir, 1, &ev) &&
+           (ir.EventType != KEY_EVENT || !ir.Event.KeyEvent.bKeyDown)) {
+    }
+}
+
 // 'r' in the session list: edit the drift-side display title in the same
 // input popup used for file creation, pre-filled with the current title.
 // Enter with an emptied field reverts to the parsed first-prompt title.
@@ -1111,6 +1204,92 @@ void HandleRenameSession() {
     } else {
         ParseSessionTitle(sel->path, sel->title, sizeof(sel->title));
     }
+}
+
+// 'r' in the workspace list: edit the workspace's display name in the same
+// popup, pre-filled with the current name. Enter on an emptied field (or the
+// folder's own name) clears the overlay and reverts to the folder name. Only
+// the .drift-name sidecar changes -- the folder and its sessions are untouched.
+void HandleRenameWorkspace() {
+    if (current_directory_file_count == 0) return;
+    WIN32_FIND_DATA* sel = &current_directory_files[selected_row];
+    if (!IsDirectory(sel)) return;
+    char folder[MAX_PATH];
+    snprintf(folder, sizeof(folder), "%s", sel->cFileName);
+
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
+    int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
+    int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
+
+    int popup_h = 3;
+    int popup_w = CREATE_POPUP_WIDTH;
+    if (popup_w > screen_width - 2) popup_w = screen_width - 2;
+    if (popup_w < 14 || screen_height < popup_h) return;
+
+    int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
+    int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
+
+    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
+    if (popup_buffer == NULL) return;
+
+    char name[MAX_PATH];
+    int max_len = popup_w - 10;
+    char current[MAX_PATH];
+    WorkspaceDisplayName(folder, current, sizeof(current));
+    snprintf(name, sizeof(name), "%.*s", max_len, current);
+    int pos = (int)strlen(name);
+    bool cancelled = false;
+
+    CONSOLE_CURSOR_INFO cursor_info = { 25, TRUE };
+    SetConsoleCursorInfo(hAlt, &cursor_info);
+
+    while (1) {
+        DrawCreatePopup(popup_w, name, NULL, popup_buffer);
+        COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
+        COORD origin = { 0, 0 };
+        SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
+                              (SHORT)(start_col + popup_w - 1), (SHORT)(start_row + popup_h - 1) };
+        WriteConsoleOutputW(hAlt, popup_buffer, buffer_size, origin, &region);
+        COORD cursor_pos = { (SHORT)(start_col + 8 + pos), (SHORT)(start_row + 1) };
+        SetConsoleCursorPosition(hAlt, cursor_pos);
+
+        INPUT_RECORD input;
+        DWORD events;
+        if (!ReadConsoleInput(hIn, &input, 1, &events)) {
+            cancelled = true;
+            break;
+        }
+        if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) continue;
+
+        WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+        char ch = input.Event.KeyEvent.uChar.AsciiChar;
+        if (vk == VK_RETURN) break;
+        if (vk == VK_ESCAPE) {
+            cancelled = true;
+            break;
+        }
+        if (vk == VK_BACK && pos > 0) {
+            pos--;
+            name[pos] = '\0';
+        } else if (ch >= 32 && ch < 127 && pos < max_len) {
+            name[pos] = ch;
+            pos++;
+            name[pos] = '\0';
+        }
+    }
+    free(popup_buffer);
+    cursor_info.bVisible = FALSE;
+    SetConsoleCursorInfo(hAlt, &cursor_info);
+    if (cancelled) return;
+
+    // A name equal to the folder's own name needs no overlay -- clear it
+    if (_stricmp(name, folder) == 0) name[0] = '\0';
+    if (name[0] != '\0' && WorkspaceNameTaken(name, folder)) {
+        NotifyNameTaken(name);
+        return;
+    }
+    SetWorkspaceName(folder, name);
 }
 
 // 'd' in the session list: delete the transcript (recycle bin) after a
@@ -1287,7 +1466,13 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
         WIN32_FIND_DATA* w = &current_directory_files[i];
         WORD c = strcmp(w->cFileName, claude_workspace_name) == 0 ? white : blue;
         if (!IsDirectory(w)) c = gray;
-        AnsiToWide(w->cFileName, wname, MAX_PATH);
+        if (IsDirectory(w)) {
+            char disp[MAX_PATH];
+            WorkspaceDisplayName(w->cFileName, disp, sizeof(disp));
+            AnsiToWide(disp, wname, MAX_PATH);
+        } else {
+            AnsiToWide(w->cFileName, wname, MAX_PATH);
+        }
         int len = (int)wcslen(wname);
         for (int col = 0; col < len && col < COLUMN_DIVIDER_POSITION - 2; col++) {
             int index = (i + 2) * width + col;
@@ -1331,7 +1516,9 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
     int col_start = divider2 + 2;
     SessionEntry* sel = &sessions[session_selected];
 
-    WriteToBuffer(buffer, width, 2, col_start, claude_workspace_name, yellow);
+    char ws_disp[MAX_PATH];
+    WorkspaceDisplayName(claude_workspace_name, ws_disp, sizeof(ws_disp));
+    WriteToBuffer(buffer, width, 2, col_start, ws_disp, yellow);
     char meta[64];
     snprintf(meta, sizeof(meta), "%d session%s", session_count, session_count == 1 ? "" : "s");
     WriteToBuffer(buffer, width, 3, col_start, meta, white);
@@ -1608,7 +1795,9 @@ void EnterEditMode() {
     if (!IsDirectory(&current_directory_files[selected_row])) return;
     char* name = current_directory_files[selected_row].cFileName;
     if (snprintf(edit_workspace, MAX_PATH, "%s\\%s", workspaces_root, name) >= MAX_PATH) return;
-    snprintf(edit_workspace_name, MAX_PATH, "%s", name);
+    // edit_workspace keeps the real folder path; the shown label uses the
+    // display name so editing reads the same as everywhere else
+    WorkspaceDisplayName(name, edit_workspace_name, MAX_PATH);
 
     LoadMembersFrom(edit_workspace);
     manifest_focused = false;
@@ -1736,6 +1925,7 @@ void DrawClaudeHelpPane(CHAR_INFO* buffer, int width, int height) {
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "n    new session", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "e    edit workspace", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "a    new workspace", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "r    rename", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "y/p  duplicate", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "d    delete", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "c    back to files", gray);
@@ -1775,7 +1965,7 @@ void DrawClaudeInfoPane(CHAR_INFO* buffer, int width, int height, int divider2) 
         WriteToBuffer(buffer, width, 4 + i, col, row_text, white);
     }
 
-    WriteToBuffer(buffer, width, height - 1, col, "l open  e edit  a new  d delete", gray);
+    WriteToBuffer(buffer, width, height - 1, col, "l open  r rename  e edit  a new  d delete", gray);
 }
 
 // The pinned folder list while a workspace edit is armed: the whole design
@@ -1913,6 +2103,10 @@ int HandleInput() {
         }
         if (vk == 'E') {
             EnterEditMode();
+            return 1;
+        }
+        if (vk == 'R') {
+            HandleRenameWorkspace();
             return 1;
         }
         if (vk == 'N') {
@@ -2818,6 +3012,42 @@ void HandleCreate() {
 
     if (name[0] == '\0') return;
 
+    if (claude_mode == CM_WORKSPACES) {
+        // The typed text is the workspace's DISPLAY name. The folder itself is
+        // an opaque, always-unique timestamp id, so naming never touches the
+        // path Claude keys its sessions under, and the shown-name namespace is
+        // the only one the user deals with. Accepting the greyed default leaves
+        // the workspace "untitled" -- it just shows its timestamp id.
+        bool custom = strcmp(name, placeholder) != 0;
+        if (custom && WorkspaceNameTaken(name, NULL)) {
+            NotifyNameTaken(name);
+            return;
+        }
+        // Mint a unique folder id from the timestamp, suffixing on the (rare)
+        // same-second clash so an existing folder is never silently reused
+        char id[MAX_PATH];
+        snprintf(id, sizeof(id), "%s", placeholder);
+        int n = 2;
+        while (1) {
+            char probe[MAX_PATH];
+            if (snprintf(probe, MAX_PATH, "%s\\%s", workspaces_root, id) >= MAX_PATH) return;
+            if (GetFileAttributes(probe) == INVALID_FILE_ATTRIBUTES) break; // free
+            if (snprintf(id, sizeof(id), "%s-%d", placeholder, n++) >= MAX_PATH) return;
+        }
+        char anchor[MAX_PATH];
+        if (snprintf(anchor, MAX_PATH, "%s\\%s", workspaces_root, id) >= MAX_PATH) return;
+        if (!CreateDirectory(anchor, NULL)) return;
+        if (custom) SetWorkspaceName(id, name); // else it shows the id itself
+        ReloadCurrentDirectory();
+        for (int i = 0; i < current_directory_file_count; i++) {
+            if (_stricmp(current_directory_files[i].cFileName, id) == 0) {
+                selected_row = i;
+                break;
+            }
+        }
+        return;
+    }
+
     // Strip the trailing backslash (directory marker) before building the path
     // so the name is also usable for the cursor lookup below
     int len = (int)strlen(name);
@@ -2825,9 +3055,6 @@ void HandleCreate() {
     if (is_directory) {
         name[len - 1] = '\0';
         if (name[0] == '\0') return;
-    }
-    if (claude_mode == CM_WORKSPACES) {
-        is_directory = true; // workspaces are always directories
     }
 
     char full_path[MAX_PATH];
