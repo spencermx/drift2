@@ -3060,6 +3060,10 @@ int CompareFiles(const void* a, const void* b) {
 }
 
 int GetFilesInDirectory(char* path, WIN32_FIND_DATA files[]) {
+    if (path[0] == '\0') {
+        return 0; // "" would search "\*", i.e. the root of the current drive
+    }
+
     char search_path[MAX_PATH];
     if (snprintf(search_path, MAX_PATH, "%s\\*", path) >= MAX_PATH) {
         return 0; // would truncate -- don't list a different directory
@@ -3895,7 +3899,24 @@ bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file, char* out_path)
 }
 
 bool IsRootDirectory(char* path) {
-    return strlen(path) == 3 && path[1] == ':' && path[2] == '\\';
+    if (strlen(path) == 3 && path[1] == ':' && path[2] == '\\') {
+        return true; // "C:\"
+    }
+    // A UNC share is a root too: there is no directory above \\server\share.
+    // Treating it as an ordinary path let GetParentDirectory strip back to
+    // "\\server", which lists nothing, and then to "\", whose search pattern
+    // quietly resolves against the local drive
+    if (path[0] == '\\' && path[1] == '\\') {
+        const char* share = strchr(path + 2, '\\');
+        if (share == NULL) {
+            return true; // "\\server" -- nothing above it either
+        }
+        const char* next = strchr(share + 1, '\\');
+        if (next == NULL || next[1] == '\0') {
+            return true; // "\\server\share", with or without a trailing slash
+        }
+    }
+    return false;
 }
 
 bool IsMarkDirectorySet() {
