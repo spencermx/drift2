@@ -42,6 +42,9 @@
 //              workspace; N starts a new session (works from the workspace
 //              list too). claude is spawned via "cmd /c claude" so both a
 //              native exe and the npm .cmd shim resolve.
+// - R / D    : (session list) rename the session's drift display title
+//              (stored in <anchor>\.drift-titles, claude files untouched)
+//              / delete the session transcript (recycle bin, confirmed)
 // Run "drift -c" to start directly in the claude workspace browser.
 //
 // Layout: three panes when the window is at least 80 columns wide --
@@ -163,6 +166,10 @@ void EnterEditMode();
 void ExitEditMode();
 void HandleQuickAdd();
 int LaunchClaudeIn(const char* anchor, const char* args);
+void ApplyTitleOverrides(const char* anchor);
+void SetTitleOverride(const char* anchor, const char* id, const char* title);
+void HandleRenameSession();
+void HandleDeleteSession();
 void DrawManifestPane(CHAR_INFO* buffer, int width, int height, int divider2);
 bool GetSelectedRowPath(int selected_row, char* out_path);
 bool GetFilePath(char* current_directory, WIN32_FIND_DATA* file_data, char* out_path);
@@ -943,6 +950,233 @@ void LoadSessionsFor(const char* anchor) {
     FindClose(hFind);
 
     qsort(sessions, session_count, sizeof(SessionEntry), CompareSessions);
+    ApplyTitleOverrides(anchor);
+}
+
+// Drift-side session titles live in <anchor>\.drift-titles as tab-separated
+// "id<TAB>title" lines -- claude's own files are never modified
+void ApplyTitleOverrides(const char* anchor) {
+    char file[MAX_PATH];
+    if (snprintf(file, MAX_PATH, "%s\\.drift-titles", anchor) >= MAX_PATH) return;
+    FILE* f = fopen(file, "rb");
+    if (f == NULL) return;
+
+    char line[SESSION_TITLE_LEN + 64];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char* tab = strchr(line, '\t');
+        if (tab == NULL) continue;
+        *tab = '\0';
+        char* title = tab + 1;
+        size_t tl = strlen(title);
+        while (tl > 0 && (title[tl - 1] == '\n' || title[tl - 1] == '\r')) {
+            title[--tl] = '\0';
+        }
+        if (tl == 0) continue;
+        for (int i = 0; i < session_count; i++) {
+            if (_stricmp(sessions[i].id, line) == 0) {
+                snprintf(sessions[i].title, SESSION_TITLE_LEN, "%s", title);
+                break;
+            }
+        }
+    }
+    fclose(f);
+}
+
+// Replaces (or, with an empty title, removes) one id's entry
+void SetTitleOverride(const char* anchor, const char* id, const char* title) {
+    char file[MAX_PATH];
+    if (snprintf(file, MAX_PATH, "%s\\.drift-titles", anchor) >= MAX_PATH) return;
+    char tmp[MAX_PATH];
+    if (snprintf(tmp, MAX_PATH, "%s.tmp", file) >= MAX_PATH) return;
+
+    FILE* in = fopen(file, "rb");
+    FILE* out = fopen(tmp, "wb");
+    if (out == NULL) {
+        if (in != NULL) fclose(in);
+        return;
+    }
+    if (in != NULL) {
+        char line[SESSION_TITLE_LEN + 64];
+        while (fgets(line, sizeof(line), in) != NULL) {
+            char* tab = strchr(line, '\t');
+            if (tab != NULL) {
+                *tab = '\0';
+                bool same = _stricmp(line, id) == 0;
+                *tab = '\t';
+                if (same) continue;
+            }
+            fputs(line, out);
+        }
+        fclose(in);
+    }
+    if (title[0] != '\0') {
+        fprintf(out, "%s\t%s\n", id, title);
+    }
+    fclose(out);
+    MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
+}
+
+// 'r' in the session list: edit the drift-side display title in the same
+// input popup used for file creation, pre-filled with the current title.
+// Enter with an emptied field reverts to the parsed first-prompt title.
+void HandleRenameSession() {
+    if (session_count == 0) return;
+    SessionEntry* sel = &sessions[session_selected];
+
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
+    int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
+    int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
+
+    int popup_h = 3;
+    int popup_w = CREATE_POPUP_WIDTH;
+    if (popup_w > screen_width - 2) popup_w = screen_width - 2;
+    if (popup_w < 14 || screen_height < popup_h) return;
+
+    int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
+    int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
+
+    CHAR_INFO* popup_buffer = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
+    if (popup_buffer == NULL) return;
+
+    char name[MAX_PATH];
+    int max_len = popup_w - 10;
+    snprintf(name, sizeof(name), "%.*s", max_len, sel->title);
+    int pos = (int)strlen(name);
+    bool cancelled = false;
+
+    CONSOLE_CURSOR_INFO cursor_info = { 25, TRUE };
+    SetConsoleCursorInfo(hAlt, &cursor_info);
+
+    while (1) {
+        DrawCreatePopup(popup_w, name, popup_buffer);
+        COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
+        COORD origin = { 0, 0 };
+        SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
+                              (SHORT)(start_col + popup_w - 1), (SHORT)(start_row + popup_h - 1) };
+        WriteConsoleOutputW(hAlt, popup_buffer, buffer_size, origin, &region);
+        COORD cursor_pos = { (SHORT)(start_col + 8 + pos), (SHORT)(start_row + 1) };
+        SetConsoleCursorPosition(hAlt, cursor_pos);
+
+        INPUT_RECORD input;
+        DWORD events;
+        if (!ReadConsoleInput(hIn, &input, 1, &events)) {
+            cancelled = true;
+            break;
+        }
+        if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) continue;
+
+        WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+        char ch = input.Event.KeyEvent.uChar.AsciiChar;
+        if (vk == VK_RETURN) break;
+        if (vk == VK_ESCAPE) {
+            cancelled = true;
+            break;
+        }
+        if (vk == VK_BACK && pos > 0) {
+            pos--;
+            name[pos] = '\0';
+        } else if (ch >= 32 && ch < 127 && pos < max_len) {
+            name[pos] = ch;
+            pos++;
+            name[pos] = '\0';
+        }
+    }
+    free(popup_buffer);
+    cursor_info.bVisible = FALSE;
+    SetConsoleCursorInfo(hAlt, &cursor_info);
+    if (cancelled) return;
+
+    SetTitleOverride(claude_workspace, sel->id, name);
+    if (name[0] != '\0') {
+        snprintf(sel->title, sizeof(sel->title), "%s", name);
+    } else {
+        ParseSessionTitle(sel->path, sel->title, sizeof(sel->title));
+    }
+}
+
+// 'd' in the session list: delete the transcript (recycle bin) after a
+// confirmation popup
+void HandleDeleteSession() {
+    if (session_count == 0) return;
+    SessionEntry* sel = &sessions[session_selected];
+
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
+    int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
+    int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
+
+    int popup_w = 44;
+    int popup_h = 7;
+    if (popup_w > screen_width) popup_w = screen_width;
+    if (popup_w < 20 || screen_height < popup_h) return;
+
+    CHAR_INFO* popup = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
+    if (popup == NULL) return;
+
+    for (int i = 0; i < popup_w * popup_h; i++) {
+        popup[i].Char.UnicodeChar = L' ';
+        popup[i].Attributes = white;
+    }
+    popup[0].Char.UnicodeChar = BOX_TOP_LEFT;
+    popup[popup_w - 1].Char.UnicodeChar = BOX_TOP_RIGHT;
+    int bottom = (popup_h - 1) * popup_w;
+    popup[bottom].Char.UnicodeChar = BOX_BOTTOM_LEFT;
+    popup[bottom + popup_w - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
+    for (int c = 1; c < popup_w - 1; c++) {
+        popup[c].Char.UnicodeChar = BOX_HORIZONTAL;
+        popup[bottom + c].Char.UnicodeChar = BOX_HORIZONTAL;
+    }
+    for (int r = 1; r < popup_h - 1; r++) {
+        popup[r * popup_w].Char.UnicodeChar = BOX_VERTICAL;
+        popup[r * popup_w + popup_w - 1].Char.UnicodeChar = BOX_VERTICAL;
+    }
+    WriteToBuffer(popup, popup_w, 1, 2, "Delete session?", red);
+    WriteToBuffer(popup, popup_w, 3, 2, sel->title, white);
+    WriteToBuffer(popup, popup_w, 5, 2, "[Y] Yes - Recycle Bin  [N] No", white);
+
+    int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
+    int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
+    COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
+    COORD origin = { 0, 0 };
+    SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
+                          (SHORT)(start_col + popup_w - 1), (SHORT)(start_row + popup_h - 1) };
+    WriteConsoleOutputW(hAlt, popup, buffer_size, origin, &region);
+    free(popup);
+
+    while (1) {
+        INPUT_RECORD input;
+        DWORD events;
+        if (!ReadConsoleInput(hIn, &input, 1, &events)) break;
+        if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) continue;
+
+        WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+        if (vk == 'Y') {
+            char from[MAX_PATH + 2];
+            int len = snprintf(from, MAX_PATH, "%s", sel->path);
+            if (len > 0 && len < MAX_PATH) {
+                from[len + 1] = '\0'; // double-null for SHFileOperation
+
+                SHFILEOPSTRUCT op = {0};
+                op.wFunc = FO_DELETE;
+                op.pFrom = from;
+                op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_WANTNUKEWARNING;
+
+                if (SHFileOperation(&op) == 0 && !op.fAnyOperationsAborted) {
+                    SetTitleOverride(claude_workspace, sel->id, ""); // drop stale title
+                }
+                FlushConsoleInputBuffer(hIn);
+
+                sessions_loaded_for[0] = '\0';
+                LoadSessionsFor(claude_workspace);
+                if (session_selected >= session_count) {
+                    session_selected = session_count > 0 ? session_count - 1 : 0;
+                }
+            }
+            break;
+        }
+        if (vk == 'N' || vk == VK_ESCAPE) break;
+    }
 }
 
 int CompareSessions(const void* a, const void* b) {
@@ -1072,7 +1306,7 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
 
     // Third pane: selected session details
     if (divider2 < width) {
-        WriteToBuffer(buffer, width, height - 1, divider2 + 2, "Enter resume   n new session", gray);
+        WriteToBuffer(buffer, width, height - 1, divider2 + 2, "Enter resume  n new  r rename  d delete", gray);
     }
     if (divider2 >= width || session_count == 0) return;
     int col_start = divider2 + 2;
@@ -1634,6 +1868,10 @@ int HandleInput() {
             return LaunchClaudeIn(claude_workspace, args);
         } else if (vk == 'N') {
             return LaunchClaudeIn(claude_workspace, "");
+        } else if (vk == 'R') {
+            HandleRenameSession();
+        } else if (vk == 'D') {
+            HandleDeleteSession();
         }
         return 1;
     }
