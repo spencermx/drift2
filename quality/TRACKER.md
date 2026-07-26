@@ -12,7 +12,8 @@ review-ready issue records, and recording independent verdicts. Do not add or ch
 item without following that workflow.
 
 The review reported 29 rows. One row contained two independent quick-add
-issues, so they are tracked separately here for a total of 30 items.
+issues, so they are tracked separately here for a total of 30 items. IDs past
+DRIFT-030 come from later reports and reviews rather than that initial audit.
 
 ## Workflow
 
@@ -91,3 +92,4 @@ can discover the complete commit set without the user supplying hashes.
 | DRIFT-028 | Low | Untriaged | Create accepts trailing periods/spaces that Win32 normalizes | `drift.c:3781` | — | — | — |
 | DRIFT-029 | Low | Untriaged | Path identity is case- and separator-sensitive | `drift.c:3335`, `drift.c:4210` | — | — | — |
 | DRIFT-030 | Low | Untriaged | Wine launch-file short writes are treated as success | `drift.c:1103` | — | — | — |
+| [DRIFT-031](issues/DRIFT-031.md) | Low | Untriaged | A `.cmd` launcher shim resolves bare commands from the workspace anchor | `drift.c:1250`, `drift.c:1306` | — | — | Found reviewing DRIFT-001; residual of the same threat class |
