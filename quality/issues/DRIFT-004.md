@@ -2,7 +2,7 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Awaiting review`
+**Current status:** `Verified`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** Medium
 **Final severity:** Medium
@@ -10,7 +10,7 @@ Tracker: [`TRACKER.md`](../TRACKER.md)
 `drift.c:LoadMembersFrom`, `drift.c:SaveMembersTo`;
 `tests/settings_json_test.c`, `tests/row_guard_test.c`
 **Implemented by:** Codex
-**Reviewed by:** —
+**Reviewed by:** Claude: approved with residual risk
 **Decision owner:** User unless explicitly delegated
 
 ## Trigger and impact
@@ -363,7 +363,177 @@ attribution begins with the production/test commit.
 
 ## Review history
 
-No independent review rounds yet.
+### Round 1 — Claude, 2026-07-25
+
+- **Reviewer:** `Claude` (Opus 5). Absent from `Implemented by`, so eligible.
+- **Commit set:** `5109efc` "Investigate DRIFT-004: confirm wrong-object settings
+  edits" (documentation only) and `6aea09b` "Fix DRIFT-004: target only
+  permissions member array". `git log --all --reverse --format="%H %s"
+  --grep="Audit-ID: DRIFT-004"` returns these two and no others.
+- **Verdict:** `Approved with residual risk`.
+
+**Acceptance criteria:** all twelve pass, each re-verified by the reviewer
+rather than accepted from the evidence column. Rows 1–5 and 12 were additionally
+re-tested by mutation (below), which is stronger than the recorded evidence.
+
+**Tests run by the reviewer:**
+
+- `cmd /c tests\run_tests.bat` — `ALL CHECKS PASSED`, seven stages: source lint,
+  general AddressSanitizer regressions (including the 19 shared locator cases
+  and all six member-refusal cases), 19/19 production settings-JSON cases,
+  13/13 name-metadata cases, 17/17 Claude-launcher cases, 13/13 Vim-resolver
+  cases, and the `/W4 /WX` production compile. DRIFT-001/002/003 coverage is
+  unaffected.
+- `build.bat` — optimized `/O2` build succeeded; `drift.exe` removed afterward.
+  The working tree was clean before and after the review.
+- `cl /analyze /W4 /wd4459 /c drift.c` — exit 0. Exactly three diagnostics, all
+  in code this fix does not touch and all shifted upward by the removed scanner
+  lines: C6262 at `drift.c:4098` (`HandleOldHistory` stack frame) and C6244 at
+  `drift.c:4363` and `drift.c:4379`. None is in `settings_json.h`,
+  `LoadMembersFrom`, or `SaveMembersTo`. This matches the implementer's claim.
+
+**Reviewer-added property fuzzing (throwaway harness outside the repository; no
+repository file was modified).** A hand-written JSON grammar is the largest risk
+in this change, so the reviewer built an AddressSanitizer harness that includes
+the production `settings_json.h`, replicates `SaveMembersTo`'s splice
+byte-for-byte, and asserts the end-to-end safety property: *whatever Drift
+writes, Drift must read back as exactly the membership it intended.* For every
+accepted document it checks that the spliced result re-parses, resolves to
+`REPLACE_ARRAY`, that the stored array is byte-identical to what was written,
+and that saving the same membership twice is idempotent.
+
+- Corpus of 20 hand-built documents (BOM, escaped target keys, plugin
+  collision, nested decoys, `]` inside members, all JSON value types, empty
+  arrays and objects) plus 400,000 random byte mutations of them.
+- Result: **126,529 documents accepted, 273,491 refused, 0 property violations,
+  0 AddressSanitizer reports.** No accepted document produced output Drift could
+  not read back correctly.
+- Depth boundary: the deepest accepted nesting is 63 against the documented cap
+  of 64, and neither side of the boundary crashes. The cap is real, not nominal.
+
+**Reviewer-added mutation testing (same isolation).** Eight mutants of
+`settings_json.h` were compiled against the permanent suites:
+
+1. *First `additionalDirectories` array anywhere wins* — the exact pre-fix
+   DRIFT-004 targeting rule. Caught: "a supported plugin option cannot outrank
+   the permissions path" and "nested permissions does not replace a missing root
+   object" fail in the portable suite; "supported plugin option never becomes
+   workspace membership", "save replaces only the root permissions array", and
+   "nested target cannot replace a missing root permissions object" fail in the
+   production suite. This is the decisive negative control: the headline
+   fixtures do discriminate on the original defect.
+2. *Last-match-wins variant of the same rule* — caught by the nested fixture.
+3. *Drop the `seen_directories` guard* — caught by both duplicate-target cases.
+4. *Drop the `seen_permissions` guard* — caught by the duplicate-parent case.
+5. *Allow non-string members in the directories array* — caught.
+6. *Drop the trailing-byte check (`cursor != end`)* — caught by the
+   trailing-garbage case **and** by the embedded-NUL case (see finding 1).
+7. *Remove the nesting cap* — caught by the over-deep case.
+8. *Take the insertion offset from the root brace instead of the proven
+   permissions brace* — caught by the `env` retargeting case and the empty
+   permissions-object case.
+
+Every mutant is detected. The regression coverage genuinely exercises production
+behavior and would detect reintroduction.
+
+**Independent verification of specific claims:**
+
+- Both original failure shapes are reproduced as permanent fixtures with
+  byte-exact expected output, not merely as boolean assertions.
+- `DriftLocateSettingsJsonTarget` is reached with the real byte count
+  (`(size_t)len`) at `drift.c:2186` and `drift.c:2355`, not `strlen`, so a
+  document is validated over its whole length.
+- Drift cannot trap itself with the new empty-file refusal: `SaveMembersTo`'s
+  absent branch always writes the complete skeleton, and `EnsureWorkspaceNotes`
+  creates only `CLAUDE.md`, so Drift never produces a zero-byte
+  `settings.json` (see finding 2).
+- `out` cannot overflow. It is `malloc(len + cap + 256)`; the replace path can
+  only shrink the non-array remainder, and the largest insertion adds 49 bytes
+  of literal plus `"\n  }"` and one comma — 54 bytes against 256 of headroom.
+- DRIFT-005 and DRIFT-006 were not silently treated as fixed. No locking,
+  conflict detection, or path-resolution change was added, and both tracker rows
+  remain `Untriaged`.
+
+**Findings — no code defects. Four residual/records-level items:**
+
+1. *The splice's NUL-freedom is an implicit invariant carried by the
+   trailing-byte check.* `SaveMembersTo` preserves the tail with
+   `strcat(out, json_buf + target.array_end + 1)` (`drift.c:2372`) and
+   `strcat(out, json_buf + at)` (`drift.c:2392`), both of which stop at the
+   first NUL. That is safe only because a document containing any NUL cannot
+   parse: a raw NUL inside a string trips `raw < 0x20`
+   (`settings_json.h:76`), and outside a string it fails structurally and then
+   the `parser.cursor != parser.end` check at `settings_json.h:376`. Mutant 6
+   demonstrated the coupling precisely — removing that one line broke the
+   embedded-NUL test as well as the trailing-garbage test. The behavior is
+   correct and tested today, but the dependency is non-obvious: a future
+   relaxation of the trailing-byte rule would silently reintroduce suffix
+   truncation. Recorded so that line is understood as load-bearing for data
+   integrity, not only for grammar strictness.
+2. *An existing zero-byte `settings.json` is now refused rather than
+   initialized.* The gate changed from `len > 0` to `file_exists`
+   (`drift.c:2354`), so a 0-byte file now fails the locator and yields
+   "(settings.json structure cannot be edited safely)" with a refused save,
+   where it previously received the create-from-scratch skeleton. Strictly this
+   is correct — an empty file is not valid JSON — and the implementer disclosed
+   and tested it. It is still a real behavior change with a plausible trigger
+   (a user or another tool creating the file with `touch`/`New-Item`), and the
+   message does not tell the user that deleting the empty file would let Drift
+   proceed. Drift cannot cause this state itself, as verified above. Raised for
+   the maintainer's awareness; below the section 1 reporting bar, so no new ID
+   was opened.
+3. *Load-side member extraction still decodes short escapes lossily.*
+   `LoadMembersFrom` (`drift.c:2204-2219`) writes the bare second character for
+   `\n`, `\t`, `\b`, `\f`, and `\/`, while `SaveMembersTo`'s escaper
+   (`drift.c:2311`) only re-escapes `\` and `"`, so such a member would
+   round-trip corrupted. This is pre-existing and unchanged by DRIFT-004 —
+   `\u` is separately blocked with its own reason — and these escapes cannot
+   occur in a legitimate Windows path. Out of scope; noted so a future editor
+   does not assume the new parser fixed it.
+4. *Lone surrogates and unvalidated UTF-8 are accepted inside strings Drift does
+   not own.* `\uXXXX` is decoded without surrogate pairing
+   (`settings_json.h:92-102`) and non-control high-bit bytes are opaque. This
+   cannot cause a wrong edit — any decoded value above `0x7f` simply fails the
+   key match, and the bytes are preserved verbatim — and the record already
+   declares UTF-8 validation a non-goal with Claude as the schema authority.
+   No action; confirmed harmless rather than merely accepted.
+
+**Coverage gaps:** the Unix runner `tests/run_tests.sh` still cannot execute on
+this host (no `cc` in Git Bash), so the shared header is unexercised under
+gcc/clang; the reviewer confirmed it does run under MSVC AddressSanitizer via
+`tests/row_guard_test.c`, so the parser is sanitizer-covered, only not
+cross-compiler-covered. Separately, `TestBlockedFixture` proves "load blocked
+⇒ save refused" through the `json_block_reason` short-circuit at
+`drift.c:2278`, so the save-side locator's own fail-closed path rests on the
+single `TestSaveRevalidatesFreshRead` case. That case is the right one and it
+passes, but the save-side branch is thinner than the load-side branch.
+
+**Checked and dismissed:** the `has_member` flags are redundant but not wrong,
+because the empty-object early return means they are always true where they are
+read; `needs_comma` derived from object emptiness is strictly more robust than
+the old "next non-whitespace character is not `}`" text probe; nested
+`permissions` and nested `additionalDirectories` correctly fall through to the
+generic parsers with `expected == NULL`; `ParseLiteral` and `ParseNumber` cannot
+run together into a false accept because the caller immediately requires `,` or
+a closing bracket; offsets are `int` but `length > INT_MAX` is rejected and
+`json_buf` is 64 KiB; and `target` is memset before any field is written, so a
+caller ignoring the false return sees action `NONE` rather than a stale offset.
+
+**Scope check:** clean. `6aea09b` adds `settings_json.h`, rewrites only the two
+settings functions in `drift.c` and deletes the superseded `FindArraySpan`,
+replaces the copied scanner in `tests/row_guard_test.c` with the production
+header, adds `tests/settings_json_test.c`, renumbers `tests/run_tests.bat` from
+six to seven stages and inserts the new stage, updates the `README.md` paragraph
+describing the spliced path, and updates only this issue file and its own
+tracker row. `5109efc` is documentation only. No unrelated cleanup, formatting,
+or refactoring.
+
+**Resolution:** approved with residual risk. No finding requires a change to
+this commit set, so the item closes as `Verified` with findings 1–4 and the
+coverage gaps preserved above as reviewer-discovered residual risk, separate
+from the implementer's own residual-risk section. Recorded by the reviewer under
+section 6 because no implementer was present in the session; no
+implementer-authored section of this file was modified.
 
 ## Decision history
 
@@ -375,3 +545,4 @@ No independent review rounds yet.
 | 2026-07-25 | User | `Investigating` | `Fix planned` | Approved the recommended bounded path-aware locator, fail-closed structural outcomes, byte-preserving edits, and production-linked coverage. |
 | 2026-07-25 | Codex | `Fix planned` | `Fixing` | Began the isolated parser, load/save integration, and regression implementation. |
 | 2026-07-25 | Codex | `Fixing` | `Awaiting review` | Replaced all target searches with the shared bounded structural locator, added exact production-linked and portable regression coverage, and passed full, optimized, warning, static-analysis, and quality validation. |
+| 2026-07-25 | Claude | `Awaiting review` | `Verified` | Independent review approved with residual risk: full suite, optimized build, and `/analyze` re-run; a 400,000-case AddressSanitizer property fuzz found no round-trip violation and confirmed the depth cap; eight parser mutants including the exact pre-fix targeting rule are all detected; no code defects; the NUL/trailing-byte coupling, the empty-file behavior change, pre-existing escape round-tripping, and the Unix-runner and save-side coverage gaps recorded as reviewer-discovered residual risk. |
