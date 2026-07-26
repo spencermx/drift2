@@ -93,3 +93,4 @@ can discover the complete commit set without the user supplying hashes.
 | DRIFT-029 | Low | Untriaged | Path identity is case- and separator-sensitive | `drift.c:3335`, `drift.c:4210` | — | — | — |
 | DRIFT-030 | Low | Untriaged | Wine launch-file short writes are treated as success | `drift.c:1103` | — | — | — |
 | [DRIFT-031](issues/DRIFT-031.md) | Low | Untriaged | A `.cmd` launcher shim resolves bare commands from the workspace anchor | `drift.c:1250`, `drift.c:1306` | — | — | Found reviewing DRIFT-001; residual of the same threat class |
+| [DRIFT-032](issues/DRIFT-032.md) | Low | Untriaged | Failure to resolve a safe Claude launcher produces no visible error | `drift.c:1294`, `drift.c:2822` | — | — | Found reviewing DRIFT-001; preserved as an independent UX regression |
