@@ -194,7 +194,7 @@ bool GetDriftDir(char* out);
 bool GetWorkspacesRoot(char* out);
 const char* AnchorFolder(const char* anchor);
 bool GetNameFile(char* out, const char* leaf);
-void SetNameEntry(const char* leaf, const char* key, const char* name);
+bool SetNameEntry(const char* leaf, const char* key, const char* name);
 void LoadWorkspaceNames();
 bool FindArraySpan(const char* buf, int* out_start, int* out_end);
 void LoadMembersFrom(const char* anchor);
@@ -219,9 +219,9 @@ int LaunchClaudeIn(const char* anchor, const char* session_id);
 void ScrollOriginalScreen();
 bool IsSafeSessionId(const char* id);
 void ApplySessionNames(const char* anchor);
-void SetSessionName(const char* anchor, const char* id, const char* name);
+bool SetSessionName(const char* anchor, const char* id, const char* name);
 void WorkspaceDisplayName(const char* folder, char* out, size_t out_size);
-void SetWorkspaceName(const char* folder, const char* display);
+bool SetWorkspaceName(const char* folder, const char* display);
 bool WorkspaceNameTaken(const char* name, const char* except_folder);
 void NotifyAndWait(const char* text);
 void NotifyNameTaken(const char* name);
@@ -1007,38 +1007,74 @@ bool GetNameFile(char* out, const char* leaf) {
 
 // Replaces (or, with an empty name, drops) the row under `key`. Streams the
 // old file through a temp copy rather than rewriting from memory, so the file
-// is never bounded by a buffer and a crash can't leave it half written.
+// is never bounded by a buffer. Every I/O boundary is fail-closed: the temp is
+// published only after the old file was read and both streams closed cleanly.
 // `key` is one field for workspace names, "folder<TAB>session" for session
 // names; a row matches when the line starts with the key and a tab.
-void SetNameEntry(const char* leaf, const char* key, const char* name) {
+bool SetNameEntry(const char* leaf, const char* key, const char* name) {
     char file[MAX_PATH];
-    if (!GetNameFile(file, leaf)) return;
+    if (!GetNameFile(file, leaf)) return false;
     char tmp[MAX_PATH];
-    if (snprintf(tmp, MAX_PATH, "%s.tmp", file) >= MAX_PATH) return;
+    int tmp_len = snprintf(tmp, MAX_PATH, "%s.tmp", file);
+    if (tmp_len < 0 || tmp_len >= MAX_PATH) return false;
 
     FILE* in = fopen(file, "rb");
+    bool existing = in != NULL;
+    if (!existing) {
+        DWORD attr = GetFileAttributes(file);
+        DWORD err = GetLastError();
+        bool absent = attr == INVALID_FILE_ATTRIBUTES &&
+                      (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND);
+        if (!absent) return false;
+    }
+
     FILE* out = fopen(tmp, "wb");
     if (out == NULL) {
         if (in != NULL) fclose(in);
-        return;
+        return false;
     }
+
+    bool ok = true;
     size_t klen = strlen(key);
     if (in != NULL) {
         char line[MAX_PATH + SESSION_NAME_LEN + 64];
+        bool at_line_start = true;
+        bool dropping_line = false;
         while (fgets(line, sizeof(line), in) != NULL) {
-            if (_strnicmp(line, key, klen) == 0 && line[klen] == '\t') continue;
-            fputs(line, out);
+            size_t chunk_len = strlen(line);
+            bool ends_line = strchr(line, '\n') != NULL;
+            if (at_line_start) {
+                dropping_line = chunk_len > klen &&
+                    _strnicmp(line, key, klen) == 0 && line[klen] == '\t';
+            }
+            if (!dropping_line && fputs(line, out) == EOF) {
+                ok = false;
+                break;
+            }
+            at_line_start = ends_line;
+            if (ends_line) dropping_line = false;
         }
-        fclose(in);
+        if (ferror(in)) ok = false;
+        if (fclose(in) != 0) ok = false;
     }
-    if (name[0] != '\0') {
-        fprintf(out, "%s\t%s\n", key, name);
+    if (ok && name[0] != '\0' && fprintf(out, "%s\t%s\n", key, name) < 0) {
+        ok = false;
     }
-    // On a write error the rename simply doesn't happen and the original file
-    // survives intact -- the rename is what makes an edit visible at all
-    fclose(out);
-    MoveFileEx(tmp, file, MOVEFILE_REPLACE_EXISTING);
+    if (fclose(out) != 0) ok = false;
+
+    if (!ok) {
+        DeleteFile(tmp);
+        return false;
+    }
+
+    DWORD flags = existing ? MOVEFILE_REPLACE_EXISTING : 0;
+    if (!MoveFileEx(tmp, file, flags)) {
+        DeleteFile(tmp);
+        return false;
+    }
+
     workspace_names_loaded = false;
+    return true;
 }
 
 void EnterClaudeMode() {
@@ -1487,10 +1523,11 @@ void ApplySessionNames(const char* anchor) {
 }
 
 // Replaces (or, with an empty name, drops) one session's name
-void SetSessionName(const char* anchor, const char* id, const char* name) {
+bool SetSessionName(const char* anchor, const char* id, const char* name) {
     char key[MAX_PATH];
-    if (snprintf(key, sizeof(key), "%s\t%s", AnchorFolder(anchor), id) >= (int)sizeof(key)) return;
-    SetNameEntry(SESSION_NAMES_FILE, key, name);
+    int written = snprintf(key, sizeof(key), "%s\t%s", AnchorFolder(anchor), id);
+    if (written < 0 || written >= (int)sizeof(key)) return false;
+    return SetNameEntry(SESSION_NAMES_FILE, key, name);
 }
 
 void LoadWorkspaceNames() {
@@ -1553,9 +1590,9 @@ void WorkspaceDisplayName(const char* folder, char* out, size_t out_size) {
 }
 
 // Store (or, with an empty name, clear) a workspace's display-name overlay
-void SetWorkspaceName(const char* folder, const char* display) {
+bool SetWorkspaceName(const char* folder, const char* display) {
     // An empty name drops the row, reverting to the folder name
-    SetNameEntry(WORKSPACE_NAMES_FILE, folder, display);
+    return SetNameEntry(WORKSPACE_NAMES_FILE, folder, display);
 }
 
 // True if some workspace other than except_folder already presents `name` as
@@ -1713,7 +1750,10 @@ void HandleRenameSession() {
     // an edit, and still clears the override below
     if (strcmp(name, prefill) == 0) return;
 
-    SetSessionName(claude_workspace, sel->id, name);
+    if (!SetSessionName(claude_workspace, sel->id, name)) {
+        NotifyAndWait("Session name was not saved -- press a key");
+        return;
+    }
     if (name[0] != '\0') {
         snprintf(sel->name, sizeof(sel->name), "%s", name);
     } else {
@@ -1829,7 +1869,9 @@ void HandleRenameWorkspace() {
         NotifyNameTaken(name);
         return;
     }
-    SetWorkspaceName(folder, name);
+    if (!SetWorkspaceName(folder, name)) {
+        NotifyAndWait("Workspace name was not saved -- press a key");
+    }
 }
 
 // 'd' in the session list: delete the transcript (recycle bin) after a
@@ -1889,6 +1931,7 @@ void HandleDeleteSession() {
 
         WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
         if (vk == 'Y') {
+            bool name_cleanup_failed = false;
             char from[MAX_PATH + 2];
             int len = snprintf(from, MAX_PATH, "%s", sel->path);
             if (len > 0 && len < MAX_PATH) {
@@ -1900,7 +1943,10 @@ void HandleDeleteSession() {
                 op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_WANTNUKEWARNING;
 
                 if (SHFileOperation(&op) == 0 && !op.fAnyOperationsAborted) {
-                    SetSessionName(claude_workspace, sel->id, ""); // drop the stale name
+                    // The transcript stays deleted even if this optional
+                    // metadata cleanup fails; report that partial result below.
+                    name_cleanup_failed =
+                        !SetSessionName(claude_workspace, sel->id, "");
                 }
                 FlushConsoleInputBuffer(hIn);
 
@@ -1908,6 +1954,9 @@ void HandleDeleteSession() {
                 LoadSessionsFor(claude_workspace);
                 if (session_selected >= session_count) {
                     session_selected = session_count > 0 ? session_count - 1 : 0;
+                }
+                if (name_cleanup_failed) {
+                    NotifyAndWait("Session deleted; saved name was not removed -- press a key");
                 }
             }
             break;
@@ -3969,13 +4018,20 @@ void HandleCreate() {
         if (snprintf(anchor, MAX_PATH, "%s\\%s", workspaces_root, id) >= MAX_PATH) return;
         if (!CreateDirectory(anchor, NULL)) return;
         EnsureWorkspaceNotes(anchor);
-        if (custom) SetWorkspaceName(id, name); // else it shows the id itself
+        bool display_name_saved = !custom || SetWorkspaceName(id, name);
         ReloadCurrentDirectory();
         for (int i = 0; i < current_directory_file_count; i++) {
             if (_stricmp(current_directory_files[i].cFileName, id) == 0) {
                 selected_row = i;
                 break;
             }
+        }
+        if (!display_name_saved) {
+            char msg[MAX_PATH + 80];
+            snprintf(msg, sizeof(msg),
+                     "Workspace created as \"%s\"; display name was not saved -- press a key",
+                     id);
+            NotifyAndWait(msg);
         }
         return;
     }

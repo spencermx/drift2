@@ -64,7 +64,7 @@ can discover the complete commit set without the user supplying hashes.
 |---|---|---|---|---|---|---|---|
 | [DRIFT-001](issues/DRIFT-001.md) | High | Verified | Claude launch can execute planted `cmd.exe` or `claude.*` | `drift.c:ResolveClaudeLauncherFromPath`, `drift.c:LaunchClaudeIn` | Codex | Claude: approved with residual risk | Fixed in `a9e75bd`; residual risk carried to DRIFT-031 |
 | [DRIFT-002](issues/DRIFT-002.md) | High | Verified | Vim lookup can execute a planted `vim.exe` | `drift.c:ResolveVim`, `drift.c:OpenFileInEditor` | Codex | Claude: approved | Fixed in `e1070d2` with shared absolute-`PATH` resolution; DRIFT-001 compatibility re-verified |
-| [DRIFT-003](issues/DRIFT-003.md) | Medium | Investigating | Name metadata can be replaced by a truncated file | `drift.c:SetNameEntry` | — | — | Confirmed; fail-closed streaming rewrite recommended |
+| [DRIFT-003](issues/DRIFT-003.md) | Medium | Awaiting review | Name metadata can be replaced by a truncated file | `drift.c:SetNameEntry` | Codex | — | Fail-closed rewrite and production-linked regression suite complete |
 | DRIFT-004 | Medium | Untriaged | Settings JSON scanner can edit the wrong object | `drift.c:FindArraySpan`, `drift.c:SaveMembersTo` | — | — | — |
 | DRIFT-005 | Medium | Untriaged | Concurrent workspace member changes can be overwritten | `drift.c:LoadMembersFrom`, `drift.c:SaveMembersTo` | — | — | — |
 | DRIFT-006 | Medium | Untriaged | Relative `additionalDirectories` resolve against the wrong location | `drift.c:LoadMembersFrom`, `drift.c:FindMember` | — | — | — |
