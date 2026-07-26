@@ -5,16 +5,16 @@ runtime dependencies — plus a workspace manager for Claude Code built on top o
 it.
 
 ```
-C:\Users\spencer\source\repos\drift                                      5/8
+C:\Users\spencer\source\repos\drift\src                                   1/2
 ─────────────────────────┬────────────────────────┬───────────────────────────
-  .claude                │    .git                │ // A simple terminal file
-  .config                │    tests               │ // browser for Windows
-  claude1                │    .gitignore          │ // Controls:
-  drift                  │    README.md           │ // - Q        : Quit
-  notes                  │ ███drift.c█████████████│ // - H        : Parent dir
-                         │    drift.exe           │ // - L        : Enter dir
-                         │    build.bat           │ // - J        : Down
-                         │    run.sh              │ // - K        : Up
+  .git                   │ ███drift.c█████████████│ // A simple terminal file
+  build                  │    settings_json.h     │ // browser for Windows
+  dist                   │                        │ // Controls:
+  quality                │                        │ // - Q        : Quit
+  scripts                │                        │ // - H        : Parent dir
+  src                    │                        │ // - L        : Enter dir
+  tests                  │                        │ // - J        : Down
+                         │                        │ // - K        : Up
 ```
 
 Parent directory on the left, current in the middle, and a third pane that
@@ -26,12 +26,13 @@ two panes.
 
 ## Install
 
-1. Grab `drift.exe` from [Releases](../../releases), or build it (below)
-2. Put `drift.exe` and `drift.bat` somewhere on your `PATH`
+1. Grab `drift.exe` from [Releases](../../releases), or build it (below — it
+   lands in `build\`)
+2. Put `drift.exe` and `dist\drift.bat` somewhere on your `PATH`
 3. Run `drift`
 
-Run it via the `drift.bat` wrapper rather than the exe directly and your shell
-follows drift to wherever you quit:
+Run it via the `dist\drift.bat` wrapper rather than the exe directly and your
+shell follows drift to wherever you quit:
 
 ```batch
 @echo off
@@ -204,32 +205,48 @@ Windows file handle, which is released when the operation or process ends.
 |-|-|
 | `DRIFT_HOME` | overrides `%USERPROFILE%` for `~` and for `.drift\` |
 | `DRIFT_CLAUDE_DIR` | where to find `.claude\projects` |
-| `DRIFT_HOST_DRIVE` | write workspace folders host-style — see `run.sh` |
+| `DRIFT_HOST_DRIVE` | write workspace folders host-style — see `scripts/run.sh` |
 | `DRIFT_LAUNCH_FILE` | hand Claude launches to a wrapper instead of spawning them |
 
-The last two exist for `run.sh`, which builds and runs drift under Wine on macOS
-so it can be developed off-Windows.
+The last two exist for `scripts/run.sh`, which builds and runs drift under Wine
+on macOS so it can be developed off-Windows.
 
 ---
 
 ## Build
 
-**Windows.** Run `build.bat` — it finds Visual Studio itself and tells you what
-to install if the C++ tools are missing. From a Developer Command Prompt:
+**Layout.**
+
+```
+src/       drift.c and settings_json.h — one translation unit
+tests/     regression tests; each includes ../src/drift.c whole
+scripts/   build.bat, run_tests.bat, run_tests.sh, run.sh
+dist/      drift.bat and refresh_prompt.bat — the shipped shell wrappers
+quality/   issue tracker, audits, and validate.ps1
+build/     compiler output (gitignored)
+```
+
+Every script in `scripts/` switches to the repository root first, so it can be
+invoked from anywhere.
+
+**Windows.** Run `scripts\build.bat` — it finds Visual Studio itself and tells
+you what to install if the C++ tools are missing. It writes `build\drift.exe`.
+From a Developer Command Prompt:
 
 ```batch
-cl /W3 /O2 drift.c /Fe:drift.exe shell32.lib
+cl /W3 /O2 src\drift.c /Fe:build\drift.exe shell32.lib
 ```
 
 **Cross-compile.**
 
 ```bash
-x86_64-w64-mingw32-gcc drift.c -o drift.exe -lshell32
+x86_64-w64-mingw32-gcc src/drift.c -o build/drift.exe -lshell32
 ```
 
-**Tests.** `tests/run_tests.sh` runs a static lint for the frame buffer's
+**Tests.** `scripts/run_tests.sh` runs a static lint for the frame buffer's
 row-guard invariant, a regression suite under AddressSanitizer, and a
-full-warning cross-compile. It's host-native — no Wine needed.
+full-warning cross-compile. It's host-native — no Wine needed. On Windows,
+`scripts\run_tests.bat` runs the full ten-stage MSVC suite.
 
 ---
 

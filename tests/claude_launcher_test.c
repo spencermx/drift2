@@ -2,7 +2,7 @@
 // translation unit so these tests exercise the resolver and process-spec
 // builder that Drift actually ships rather than a copied implementation.
 #define main drift_application_main
-#include "../drift.c"
+#include "../src/drift.c"
 #undef main
 
 static int test_failures = 0;

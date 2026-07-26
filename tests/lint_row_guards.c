@@ -103,8 +103,8 @@ int main(int argc, char* argv[]) {
     if (source != NULL) {
         f = fopen(source, "rb");
     } else {
-        // Runnable from the repo root or from tests/
-        source = "../drift.c";
+        // Runnable from the repo root or from src/
+        source = "src/drift.c";
         f = fopen(source, "rb");
         if (f == NULL) {
             source = "drift.c";

@@ -30,6 +30,21 @@ No additional process explanation from the user should be required.
   its scope, baseline, methods, limitations, and the IDs it reported. The
   tracker—not an audit report—remains authoritative for current status.
 
+## Repository paths in older records
+
+On 2026-07-26 the repository was reorganized: `drift.c` and `settings_json.h`
+moved to `src/`, the test runners moved from `tests/` to `scripts/` alongside
+`build.bat` and `run.sh`, the shipped `drift.bat` and `refresh_prompt.bat` moved
+to `dist/`, and build output now lands in `build/`.
+
+Issue and audit records written before that date cite the old paths — `drift.c`
+at the root, `tests\run_tests.bat`, `build.bat`. They are dated evidence of what
+was true when the work was reviewed, so they were left unedited; audits are
+immutable by rule and `validate.ps1` enforces it. Read `drift.c` as
+`src/drift.c` and `tests\run_tests.bat` as `scripts\run_tests.bat` in any record
+predating this note. Line numbers in older records were already approximate and
+should be confirmed against the current source. New records use current paths.
+
 ## Start here
 
 First read this file and `TRACKER.md`, then follow the route matching the work

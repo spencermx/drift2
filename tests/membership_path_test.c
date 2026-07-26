@@ -3,7 +3,7 @@
 // disposable %TEMP% workspace.
 #define _CRT_SECURE_NO_WARNINGS
 #define main drift_application_main
-#include "../drift.c"
+#include "../src/drift.c"
 #undef main
 
 static int path_test_failures;
@@ -275,7 +275,7 @@ static int PathTestCountSubstring(const char* text, const char* needle) {
 }
 
 static void TestPathProductionWiring(void) {
-    FILE* file = fopen("..\\drift.c", "rb");
+    FILE* file = fopen("src\\drift.c", "rb");
     char* source = NULL;
     if (file != NULL) {
         fseek(file, 0, SEEK_END);

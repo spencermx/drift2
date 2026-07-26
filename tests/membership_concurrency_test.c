@@ -5,7 +5,7 @@
 #define DRIFT_MEMBER_LOCK_RETRY_MS 10
 #define _CRT_SECURE_NO_WARNINGS
 #define main drift_application_main
-#include "../drift.c"
+#include "../src/drift.c"
 #undef main
 
 #define CHILD_RESULT_BASE 20
@@ -360,7 +360,7 @@ static int CountSubstring(const char* text, const char* needle) {
 }
 
 static void TestProductionWiring(void) {
-    FILE* file = fopen("..\\drift.c", "rb");
+    FILE* file = fopen("src\\drift.c", "rb");
     bool opened = file != NULL;
     char* source = NULL;
     if (opened) {
