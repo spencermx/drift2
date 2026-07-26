@@ -2,7 +2,7 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Awaiting review`
+**Current status:** `Verified`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** Medium
 **Final severity:** Medium
@@ -10,7 +10,7 @@ Tracker: [`TRACKER.md`](../TRACKER.md)
 `drift.c:FindMember`, `drift.c:ApplyMemberChange`, `drift.c:JumpToMemberAt`,
 `tests/membership_path_test.c`, `tests/run_tests.bat`
 **Implemented by:** Codex
-**Reviewed by:** —
+**Reviewed by:** Claude: approved with residual risk
 **Decision owner:** User unless explicitly delegated
 
 ## Trigger and impact
@@ -368,7 +368,141 @@ from links/aliases (DRIFT-029), failed-read safety (DRIFT-034), or a general
 
 ## Review history
 
-No independent review rounds have been recorded yet.
+### Round 1 — Claude, 2026-07-26
+
+- **Reviewer:** `Claude` (Opus 5). Absent from `Implemented by`, so eligible.
+- **Commit set:** `7b17f57` "Investigate DRIFT-006: confirm relative member
+  misresolution" (documentation only) and `0c1372c` "Fix DRIFT-006: anchor
+  relative workspace members". `git log --all --reverse --format="%H %s"
+  --grep="Audit-ID: DRIFT-006"` returns these two and no others.
+- **Verdict:** `Approved with residual risk`.
+
+**Acceptance criteria:** all twelve pass, each re-verified by the reviewer
+rather than accepted from the evidence column.
+
+**Tests run by the reviewer:**
+
+- `cmd /d /c tests\run_tests.bat` — `ALL CHECKS PASSED`, nine stages, exit 0,
+  including 12/12 membership-path cases, 13/13 DRIFT-005 concurrency cases,
+  19/19 DRIFT-004 settings cases, 13/13 name-metadata cases, 17/17 Claude
+  launcher, 13/13 Vim resolver, and the `/W4 /WX` compile.
+- `build.bat` — optimized `/O2` build succeeded; `drift.exe` removed afterward.
+- `cl /analyze /W4 /wd4459 /c drift.c` — exit 0. Three diagnostics, all in code
+  this fix does not touch: C6262 at `drift.c:4461`, C6244 at `drift.c:4727` and
+  `drift.c:4743`.
+
+**Reviewer-added property harness** (throwaway, outside the repository; includes
+the production translation unit, touches no real configuration). The central
+claim of this fix is that resolution is lexical and anchored, so the process
+working directory can never influence it. The harness resolves 49 adversarial
+stored spellings against 9 anchors — relative, dotted, forward-slash,
+drive-absolute, drive-relative, root-relative, UNC, `\\?\` device, trailing
+space/dot, reserved names, and non-ASCII — and asserts five properties:
+
+1. Identical results when resolved from three different process working
+   directories (`%TEMP%`, the system directory, and `C:\`).
+2. Resolution is idempotent: resolving an already-resolved path is stable.
+3. A refused value always leaves `out` empty rather than partially written.
+4. A stored row is always found by both its own spelling and its resolved
+   absolute spelling.
+5. `MemberPathsEqual` agrees exactly with resolved-target equality in both
+   directions.
+
+**Result: 2,652 checks, 0 failures, no AddressSanitizer reports.** The
+CWD-independence claim holds.
+
+**Reviewer-added mutation testing** (same isolation). Six mutants compiled
+against the permanent suites:
+
+1. *Pass the raw configured value to `GetFullPathNameA` instead of the anchored
+   candidate* — the exact pre-fix DRIFT-006 defect. **Caught**, 4 cases fail.
+2. *Drop `FindMember`'s resolved second pass* — **caught**, 2 cases.
+3. *Revert removal to deleting only the matched index* — **caught**, 2 cases.
+4. *Hand the raw member to the browser on manifest Enter* — **caught**, 2 cases.
+5. *Accept ambiguous drive-relative `C:folder`* — **caught**.
+6. *Drop load-time resolvability validation* — **caught**.
+
+All six are detected, and **every one left the 13 DRIFT-005 concurrency cases
+green**, confirming the new identity logic did not leak into that contract.
+
+**Shared-code coupling under rule 6 — confirmed compatible.** `0c1372c`
+materially rewrites `ApplyMemberChange` (a new resolution gate, a replaced
+removal loop) and changes `FindMember`'s matching semantics — both DRIFT-005
+production code that its rebase decision depends on — and adds validation inside
+`LoadMembersFrom`, which DRIFT-004 governs. The commit carries only
+`Audit-ID: DRIFT-006`; see finding 1. Because this reviewer reviewed both
+affected items and implemented neither, compatibility is confirmed here rather
+than bouncing them, so both remain `Verified`:
+
+- **DRIFT-004:** `settings_json.h` is untouched, and the byte-preserving splice
+  in `SaveMembersTo` is untouched. All 19 production settings cases plus the 19
+  shared locator and 6 member-refusal cases pass unchanged.
+- **DRIFT-005:** the lock still spans load through publication. Acquisition is
+  at `drift.c:2705`, `SaveMembersTo` at `drift.c:2757`, and the single
+  `CloseHandle` exit is still reached by every path; every statement DRIFT-006
+  added sits inside that window. All 13 concurrency cases pass, and stayed green
+  under all six mutants above.
+
+**Findings — no defect introduced in the resolver itself. Three items:**
+
+1. *The commit does not repeat the affected `Audit-ID:` trailers.* A future
+   reviewer running `git log --grep="Audit-ID: DRIFT-005"` will not find
+   `0c1372c`, even though it rewrote a substantial part of `ApplyMemberChange`
+   and changed the `FindMember` semantics that transaction relies on. Rule 9
+   forbids amending a reviewed commit, and `README.md` prescribes the remedy: a
+   documentation-only bridge commit repeating every affected `Audit-ID:` and
+   naming the immutable commit. Precedent already exists — `7a3759e` did exactly
+   this for the DRIFT-001/DRIFT-002 shared refactor. Compatibility itself is
+   confirmed above; what is missing is only the discoverable linkage.
+2. *Quick-add from armed edit mode leaves the manifest describing another
+   workspace, and the new anchored jump then resolves against the wrong anchor.*
+   `Shift+W` is not consumed by the armed-edit branch (its fall-through guard is
+   `!ctrl && !shift` at `drift.c:3316`), so `HandleQuickAdd` runs with
+   `edit_armed` set and `ApplyMemberChange(B, …)` replaces `members[]` and
+   `member_anchor` with workspace B's while `edit_workspace` still names A. A
+   reviewer probe confirms the divergence and shows `JumpToMemberAt`
+   (`drift.c:2807`) navigating to A's interpretation of a row loaded from B,
+   because it resolves against `edit_workspace` rather than the `member_anchor`
+   this fix introduced for exactly that purpose. The global clobbering is
+   pre-existing and is the root cause; the anchor mismatch is new but is only
+   its symptom. No data-integrity impact, because DRIFT-005's in-lock rebase
+   makes every write correct for its own anchor. Filed as
+   [DRIFT-035](DRIFT-035.md), Low.
+3. *`resolved_path` at `drift.c:2722` is written and never read.* Only the
+   success of `ResolveMemberPath` is used as a gate. Harmless, but it invites a
+   reader to assume the resolved form is what gets stored; it is not —
+   `drift.c:2739` stores the caller's spelling, which is the intended behavior
+   and is correct because every production `ADD` caller supplies an absolute
+   browser path.
+
+**Checked and dismissed:** only fully anchored candidates reach
+`GetFullPathNameA`, because `IsFullyQualifiedMemberPath(candidate)` gates the
+call; the `candidate` buffer at `MAX_PATH * 2 + 2` bounds the longest
+`anchor + "\\" + value` combination with room to spare; `HasMemberDrivePrefix`
+and `IsFullyQualifiedMemberPath` only ever read up to the NUL terminator on
+short strings; the trailing-separator trim cannot empty a valid path, and
+returns false if it ever did; drive roots and `\\?\C:\` device roots correctly
+keep their required separator; removing every equivalent row is an intentional,
+documented repair rather than over-deletion, since equivalent rows grant the
+same directory; an unresolvable row is still counted and displayed but sets a
+block reason, so no rewrite can act on it; an over-long anchor fails closed in
+`AcquireMemberLock` before any load; and the compaction loop's `strcpy` operates
+on disjoint rows.
+
+**Scope check:** clean. `0c1372c` adds the resolver and its helpers, wires
+`FindMember`, `ApplyMemberChange`, `LoadMembersFrom`, and the manifest Enter
+handler, adds `tests/membership_path_test.c`, inserts one stage in
+`tests/run_tests.bat`, and updates this issue file and its own tracker row. It
+does not touch `settings_json.h`, the splice, or the lock. It correctly does not
+claim DRIFT-029 filesystem-object identity, DRIFT-034 failed-read safety, or a
+`MAX_PATH` redesign. `7b17f57` is documentation only.
+
+**Resolution:** approved with residual risk. No finding requires a change to
+this commit set: finding 1 asks for a follow-up bridge commit rather than an
+amendment, finding 2 is a pre-existing defect now tracked as DRIFT-035, and
+finding 3 is cosmetic. Recorded by the reviewer under section 6 because no
+implementer was present in the session; no implementer-authored section of this
+file was modified.
 
 ## Decision history
 
@@ -380,3 +514,4 @@ No independent review rounds have been recorded yet.
 | 2026-07-26 | User | `Investigating` | `Fix planned` | Approved anchor-aware operational identity, preservation of relative JSON spelling, removal of equivalent duplicates, fail-closed ambiguous/overlong handling, and production-linked tests. |
 | 2026-07-26 | Codex | `Fix planned` | `Fixing` | Began the isolated resolver, comparison/removal/navigation wiring, and regression implementation. |
 | 2026-07-26 | Codex | `Fixing` | `Awaiting review` | Implemented anchor-aware operational identity with raw-spelling preservation, all-equivalent removal, safe manifest navigation, typed fail-closed behavior, and 12 production-linked regression cases; all nine validation stages pass. |
+| 2026-07-26 | Claude | `Awaiting review` | `Verified` | Independent review approved with residual risk: nine-stage suite, optimized build, and `/analyze` re-run; a 2,652-check property harness confirmed resolution never consults the process CWD and is idempotent; six mutants including the original defect are all detected while DRIFT-005 coverage stays green; DRIFT-004 and DRIFT-005 compatibility confirmed under rule 6 despite the missing repeated audit trailers; quick-add/edit-mode anchor divergence split to DRIFT-035. |

@@ -467,6 +467,22 @@ under section 6 because no implementer was present in the session; no
 implementer-authored section of this file was modified, including the acceptance
 rows this round disputes.
 
+**Addendum — 2026-07-26, Claude: shared-code change in a later commit.**
+`0c1372c` "Fix DRIFT-006: anchor relative workspace members" materially rewrites
+part of `ApplyMemberChange` (adding a path-resolution gate and replacing the
+removal loop with all-equivalent compaction) and changes the semantics of
+`FindMember`, which this item's rebase decision depends on. That commit carries
+only `Audit-ID: DRIFT-006`, so the ordinary
+`git log --grep="Audit-ID: DRIFT-005"` search does not reach it; this note
+supplies the linkage until a bridge commit does. Compatibility was confirmed
+during DRIFT-006 Round 1 by the same reviewer, who implemented neither item:
+the lock still spans load through publication (`AcquireMemberLock` at
+`drift.c:2705`, `SaveMembersTo` at `drift.c:2757`, one `CloseHandle` exit
+reached by every path, and every added statement inside that window), all 13
+concurrency cases pass unchanged, and they stayed green under all six DRIFT-006
+mutants. DRIFT-005 therefore remains `Verified` under rule 6 rather than
+returning to `Awaiting review`.
+
 ## Decision history
 
 | Date | Actor | From | To | Summary |
