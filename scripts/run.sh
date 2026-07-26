@@ -1,8 +1,9 @@
 #!/bin/sh
 # Build (if needed) and run drift under Wine on macOS.
-# Usage: ./run.sh
+# Usage: scripts/run.sh
 set -e
-cd "$(dirname "$0")"
+# Run from the repository root so the src/ and build/ paths below resolve.
+cd "$(dirname "$0")/.."
 
 if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
     echo "Missing the Windows cross-compiler. Install it with:"
@@ -18,9 +19,10 @@ if ! command -v wine >/dev/null 2>&1; then
 fi
 
 # Rebuild only when the source is newer than the last build
-if [ ! -f drift.exe ] || [ drift.c -nt drift.exe ]; then
+if [ ! -f build/drift.exe ] || [ src/drift.c -nt build/drift.exe ]; then
     echo "Building drift.exe..."
-    x86_64-w64-mingw32-gcc drift.c -o drift.exe
+    mkdir -p build
+    x86_64-w64-mingw32-gcc src/drift.c -o build/drift.exe
 fi
 
 # Point drift's home jump (~) and workspace storage at the real macOS home;
@@ -49,7 +51,7 @@ rm -f "$LAUNCH_UNIX"
 
 DRIFT_ARGS=""
 while :; do
-    wine drift.exe $DRIFT_ARGS
+    wine build/drift.exe $DRIFT_ARGS
     [ -f "$LAUNCH_UNIX" ] || break
 
     ANCHOR_WIN=$(sed -n 1p "$LAUNCH_UNIX" | tr -d '\r')

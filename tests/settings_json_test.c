@@ -3,7 +3,7 @@
 // only beneath a uniquely named disposable %TEMP% workspace.
 #define _CRT_SECURE_NO_WARNINGS
 #define main drift_application_main
-#include "../drift.c"
+#include "../src/drift.c"
 #undef main
 
 static int test_failures;

@@ -29,7 +29,7 @@
 #include <string.h>
 #include <wchar.h>
 
-#include "../settings_json.h"
+#include "../src/settings_json.h"
 
 #define MAX_PATH 260
 #define MAX_MEMBERS 128

@@ -1,7 +1,7 @@
 // Windows-only regression coverage for DRIFT-002. Include the production
 // translation unit so these tests exercise the resolver Drift actually ships.
 #define main drift_application_main
-#include "../drift.c"
+#include "../src/drift.c"
 #undef main
 
 static int test_failures = 0;
@@ -34,7 +34,7 @@ static bool TestResolvedPathIs(const char* resolved, const char* expected) {
 }
 
 static char* TestReadSource(void) {
-    FILE* file = fopen("../drift.c", "rb");
+    FILE* file = fopen("src/drift.c", "rb");
     if (file == NULL || fseek(file, 0, SEEK_END) != 0) {
         if (file != NULL) fclose(file);
         return NULL;

@@ -1,9 +1,10 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+REM Run from the repository root so the src\ and build\ paths below resolve.
+cd /d "%~dp0.."
 
-if not exist drift.c (
-    echo drift.c not found next to this script.
+if not exist src\drift.c (
+    echo src\drift.c not found.
     exit /b 1
 )
 
@@ -38,14 +39,15 @@ if errorlevel 1 (
 )
 
 :build
+if not exist build mkdir build
 echo Building drift.exe...
-cl /nologo /W3 /O2 drift.c /Fe:drift.exe shell32.lib
+cl /nologo /W3 /O2 src\drift.c /Fe:build\drift.exe /Fo:build\drift.obj shell32.lib
 if errorlevel 1 (
     echo.
     echo Build FAILED.
     exit /b 1
 )
-del drift.obj >nul 2>&1
+del build\drift.obj >nul 2>&1
 echo.
-echo Build succeeded: %~dp0drift.exe
+echo Build succeeded: %CD%\build\drift.exe
 exit /b 0

@@ -120,7 +120,7 @@ static BOOL TestMoveFileEx(LPCSTR existing, LPCSTR replacement, DWORD flags) {
 #undef MoveFileEx
 #define MoveFileEx TestMoveFileEx
 #define main drift_application_main
-#include "../drift.c"
+#include "../src/drift.c"
 #undef main
 #undef MoveFileEx
 #undef fclose

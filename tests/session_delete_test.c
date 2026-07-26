@@ -148,7 +148,7 @@ static void* TestMalloc(size_t size) {
 #define SHFileOperation TestSHFileOperation
 #define malloc TestMalloc
 #define main drift_application_main
-#include "../drift.c"
+#include "../src/drift.c"
 #undef main
 #undef malloc
 #undef SHFileOperation
