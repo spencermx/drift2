@@ -40,7 +40,7 @@ set "status=0"
 set "OUT=%TEMP%\drift_tests"
 if not exist "%OUT%" mkdir "%OUT%"
 
-echo === 1/6  source lint: WriteToBuffer row guards ===
+echo === 1/7  source lint: WriteToBuffer row guards ===
 cl /nologo /W4 lint_row_guards.c /Fe:"%OUT%\lint.exe" /Fo:"%OUT%\lint.obj" >nul
 if errorlevel 1 (
     echo   lint build FAILED
@@ -51,7 +51,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 2/6  regression tests under AddressSanitizer ===
+echo === 2/7  regression tests under AddressSanitizer ===
 cl /nologo /W4 /fsanitize=address /Zi row_guard_test.c /Fe:"%OUT%\row_guard_test.exe" /Fo:"%OUT%\row_guard_test.obj" /Fd:"%OUT%\rgt.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -62,7 +62,18 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 3/6  fail-closed name metadata regression tests ===
+echo === 3/7  path-aware settings JSON regression tests ===
+cl /nologo /W4 /WX /wd4459 /fsanitize=address /Zi settings_json_test.c /Fe:"%OUT%\settings_json_test.exe" /Fo:"%OUT%\settings_json_test.obj" /Fd:"%OUT%\sjt.pdb" >nul
+if errorlevel 1 (
+    echo   test build FAILED
+    set "status=1"
+) else (
+    "%OUT%\settings_json_test.exe"
+    if errorlevel 1 set "status=1"
+)
+echo.
+
+echo === 4/7  fail-closed name metadata regression tests ===
 cl /nologo /W4 /WX /wd4459 /fsanitize=address /Zi name_entry_test.c /Fe:"%OUT%\name_entry_test.exe" /Fo:"%OUT%\name_entry_test.obj" /Fd:"%OUT%\net.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -73,7 +84,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 4/6  secure Claude launcher regression tests ===
+echo === 5/7  secure Claude launcher regression tests ===
 cl /nologo /W4 /wd4459 /fsanitize=address /Zi claude_launcher_test.c /Fe:"%OUT%\claude_launcher_test.exe" /Fo:"%OUT%\claude_launcher_test.obj" /Fd:"%OUT%\clt.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -84,7 +95,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 5/6  secure Vim resolver regression tests ===
+echo === 6/7  secure Vim resolver regression tests ===
 cl /nologo /W4 /WX /wd4459 /fsanitize=address /Zi vim_resolver_test.c /Fe:"%OUT%\vim_resolver_test.exe" /Fo:"%OUT%\vim_resolver_test.obj" /Fd:"%OUT%\vrt.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -98,7 +109,7 @@ echo.
 REM /WX turns any new warning into a failure. C4459 is the one known and
 REM accepted warning: GetSelectedRowPath and GetFilePath take parameters
 REM deliberately named after the globals they shadow.
-echo === 6/6  compile drift.c with full warnings ===
+echo === 7/7  compile drift.c with full warnings ===
 cl /nologo /W4 /WX /wd4459 /c ..\drift.c /Fo:"%OUT%\drift_warncheck.obj" >nul
 if errorlevel 1 (
     echo   FAILED: drift.c produced a warning beyond the known C4459 shadowing

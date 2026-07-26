@@ -2,13 +2,14 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Investigating`
+**Current status:** `Awaiting review`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** Medium
 **Final severity:** Medium
-**Primary locations:** `drift.c:FindArraySpan`, `drift.c:LoadMembersFrom`,
-`drift.c:SaveMembersTo`; `tests/row_guard_test.c`
-**Implemented by:** —
+**Primary locations:** `settings_json.h:DriftLocateSettingsJsonTarget`,
+`drift.c:LoadMembersFrom`, `drift.c:SaveMembersTo`;
+`tests/settings_json_test.c`, `tests/row_guard_test.c`
+**Implemented by:** Codex
 **Reviewed by:** —
 **Decision owner:** User unless explicitly delegated
 
@@ -178,60 +179,109 @@ deletion was established, so High would overstate the impact.
    supported Claude configuration. It violates the product's preservation
    contract and is rejected.
 
-## Recommended design
+## Agreed design and implementation
 
-Replace `FindArraySpan` and the insertion `strstr`/`strchr` pair with one shared
-locator used by both load and save:
+The user approved option 2. The implementation replaces `FindArraySpan` and the
+insertion `strstr`/`strchr` pair with one shared, length-bounded structural
+locator in `settings_json.h`:
 
-1. Parse the entire nonempty document as a root JSON object, with a documented
-   nesting limit that fails closed rather than risking unbounded recursion.
-   Allow unknown keys and values; Drift is not a schema validator for settings
-   it does not own.
-2. Compare object keys by their JSON string value, including legal escape forms,
-   so `permiss\u0069ons` cannot cause Drift to create a second semantic key.
-3. Record exactly one direct root `permissions` member. If it is present, its
-   value must be an object. More than one semantic `permissions` key is
-   ambiguous and must refuse editing.
-4. Within that object, record exactly one direct `additionalDirectories`
-   member. If present, its value must be an array of strings and its exact `[`
-   and `]` offsets become the replacement span. A duplicate or wrong type must
-   refuse editing rather than fall through to insertion.
-5. Return distinct results for: existing target array; permissions object exists
-   but target is absent; root object exists but permissions is absent; and
-   malformed, over-deep, duplicate, or wrong-typed input.
-6. Make `LoadMembersFrom` set `json_block_reason` for the refusal result. Make
-   `SaveMembersTo` re-run the locator on its fresh read and use only the
-   returned structural insertion/replacement offset. This preserves the
-   current protection against a file changing between load and save.
-7. Retain the existing size, member-count, path-length, unsupported member-value
-   escape, checked-write, close, temp cleanup, and publication protections.
-8. Add a Windows production-linked `settings_json` suite that includes
-   `drift.c`, works only below a unique disposable directory, and exercises
-   actual load/save output. Keep useful pure scanner cases, but do not treat a
-   copied helper alone as proof of production behavior.
+1. `DriftLocateSettingsJsonTarget` validates the complete document as one root
+   JSON object. It reads by explicit byte bounds rather than C-string length,
+   accepts and preserves an optional UTF-8 BOM, allows unknown JSON keys and
+   value types, and refuses nesting beyond 64 levels.
+2. Object-key comparison uses the decoded JSON string value. Literal and
+   escaped spellings such as `permissions` and `permiss\u0069ons` therefore
+   identify the same semantic key.
+3. The locator accepts at most one direct root `permissions` object and at most
+   one direct `additionalDirectories` child. The child, when present, must be an
+   array containing only strings. Wrong types or semantic duplicates make the
+   entire edit unsafe.
+4. A successful parse returns one explicit action: replace the proven array;
+   insert a child at the proven permissions-object brace; or insert a new
+   permissions object at the proven root brace. Malformed, over-deep,
+   duplicate, or wrongly typed structure returns failure rather than being
+   conflated with a missing target.
+5. `LoadMembersFrom` uses that action and parses members only from the exact
+   root path. Unsafe structure sets `json_block_reason`, leaving the manifest
+   read-only rather than displaying a decoy nested array.
+6. `SaveMembersTo` reruns the same locator on its fresh bounded read, including
+   an existing zero-byte file. It splices or inserts only at returned offsets.
+   A structurally changed file between load and save is revalidated and refused
+   if unsafe.
+7. All bytes outside the replacement span or new insertion remain untouched.
+   There is no DOM and no whole-document serialization. The existing checked
+   read, 64 KiB limit, path/member refusal rules, temp write, close, cleanup,
+   and publication path remain in force.
+8. Documented JSON is the compatibility boundary. Comments, trailing commas,
+   malformed escapes, duplicate target keys, and other invalid JSON are left
+   unchanged. Claude's documentation does not promise JSONC, and accepting it
+   would make safe structural offsets a separate grammar contract.
 
-The parser should implement the documented JSON grammar. The official docs say
-invalid JSON is reported as a settings error and do not promise JSON-with-
-comments or trailing commas. Refusing such files is therefore the proposed
-contract; accepting undocumented JSONC would require an explicit compatibility
-decision and corresponding grammar tests.
+## Production, documentation, and test changes
 
-## Acceptance criteria and planned regression coverage
+- `settings_json.h` contains the dependency-free parser and edit-action API
+  shared by production and portable tests.
+- `drift.c:LoadMembersFrom` and `SaveMembersTo` consume the shared structural
+  result; the old global scanner and text-based insertion targeting are gone.
+- `README.md:Where things live` now names the exact
+  `permissions.additionalDirectories` path and the fail-closed behavior for
+  malformed, ambiguous, or wrongly typed structure.
+- `tests/row_guard_test.c` includes the production header instead of carrying a
+  copy of the old scanner. Nineteen path/grammar cases cover parent identity,
+  escaping, insertion actions, semantic duplicates, unknown JSON values,
+  number grammar, and BOM offsets; the six existing member-refusal cases now
+  use the exact path-aware locator.
+- `tests/settings_json_test.c` includes `drift.c` and uses actual
+  `LoadMembersFrom`/`SaveMembersTo` filesystem behavior below a unique `%TEMP%`
+  workspace. Nineteen cases cover both original wrong-object writes, exact
+  byte-preserving output, escaped keys, wrong types, duplicates, non-string
+  members, trailing/malformed/empty/NUL-containing/over-deep files, save-time
+  revalidation, first-file creation, and exact comma-free insertion into empty
+  root and permissions objects. It clears `DRIFT_HOST_DRIVE` only in the test
+  process and restores it during cleanup.
+- `tests/run_tests.bat` adds that AddressSanitizer suite as stage 3 and numbers
+  the complete Windows run as seven stages.
 
-| Criterion | Required evidence |
-|---|---|
-| Only root `permissions.additionalDirectories` is loaded. | The supported plugin-option collision loads `permission-original`, never `plugin-original`. |
-| Existing membership edits replace only the intended array. | Production save changes the permissions array while the earlier plugin array and every byte outside the target span remain unchanged. |
-| Text equal to `permissions` cannot choose an object. | The announcement/`env` fixture inserts under the root permissions object and leaves `env` byte-for-byte unchanged. |
-| A missing root permissions object is created only at the root. | Fixtures with nested `permissions` keys or values receive one new direct root object without modifying the nested values. |
-| An existing permissions object receives the missing child. | Other permissions fields and their ordering/content survive while the new direct child is inserted. |
-| Wrong target or parent types fail closed. | `permissions: []` and `permissions.additionalDirectories: null` return failure, publish nothing, and never create duplicate keys. |
-| Duplicate semantic target keys fail closed. | Literal and JSON-escaped duplicate spellings both leave the file unchanged and expose a block reason. |
-| Malformed, trailing-garbage, or over-deep input fails closed. | Each case returns failure with no temp publication; valid unknown nested settings remain accepted. |
-| String escapes and structural characters cannot desynchronize parsing. | Escaped quotes, backslashes, brackets/braces in strings, nested arrays/objects, whitespace, and Unicode-escaped target keys are covered. |
-| Load and save cannot disagree about the target. | Production-linked tests call both functions for the same fixtures and assert the same exact path is selected after the save re-read. |
-| Existing safe-write and member refusal behavior remains intact. | The full Windows suite, warning compile, and all current `FindArraySpan`/`LoadMembersFrom` cases pass or are migrated to equivalent production-linked coverage. |
-| The tests detect the original bug. | At least the plugin replacement and announcement insertion cases fail against `d26bb16` and pass after the fix. |
+## Data integrity, compatibility, security, and error paths
+
+- **Data integrity:** no replacement or insertion offset is used before the
+  complete bounded document validates. Embedded NUL bytes are rejected rather
+  than letting later `strcat`/`strlen` truncate a preserved suffix. Every unsafe
+  production fixture asserts the original byte length and contents, no temp
+  publication, and a false save result.
+- **Target compatibility:** documented root-path files retain the same array
+  formatting generated by Drift, unknown settings remain byte-for-byte intact,
+  semantic escaped target keys retain their original spelling, and a missing
+  file still receives the existing skeleton. An existing empty file was
+  previously overwritten as if absent; it is now correctly treated as invalid
+  JSON and preserved.
+- **Grammar compatibility:** the parser validates structure and target types,
+  not Claude's entire evolving schema. Valid unknown objects, arrays, strings,
+  booleans, nulls, and JSON numbers remain accepted. Undocumented JSONC and
+  invalid UTF/control-byte structures are refused rather than normalized.
+- **Error paths:** load-time refusal populates the existing manifest-pane reason.
+  Save-time refusal sets the same reason and returns false through the existing
+  callers, which resync or report that settings were not updated.
+- **Security:** the change adds no process launch, path source, filesystem root,
+  or privilege transition. Length bounds and the nesting limit reduce parser
+  exposure to hostile settings content; no security elevation was claimed.
+
+## Acceptance criteria and evidence
+
+| Criterion | Result | Evidence |
+|---|---|---|
+| Only root `permissions.additionalDirectories` is loaded. | Pass | The production plugin-option collision loads `permission-original`, never `plugin-original`; the portable locator extracts the same exact span. |
+| Existing membership edits replace only the intended array. | Pass | The production save result is compared byte-for-byte with an expected document in which the earlier plugin array and every byte outside the permissions-array span are unchanged. |
+| Text equal to `permissions` cannot choose an object. | Pass | The announcement/`env` production fixture inserts under root permissions; its full expected output preserves `env` exactly. |
+| A missing root permissions object is created only at the root. | Pass | A nested decoy target remains exact while the full production output contains one new direct root object before it. |
+| An existing permissions object receives the missing child. | Pass | The announcement fixture retains `allow` and inserts the direct child at the proven permissions brace. |
+| Wrong target or parent types fail closed. | Pass | `permissions: []`, a null target, and a non-string target member all return failure, preserve every byte, leave no temp, and expose a block reason. |
+| Duplicate semantic target keys fail closed. | Pass | Literal/escaped duplicates of both `permissions` and `additionalDirectories` preserve the file and refuse publication. |
+| Malformed, trailing-garbage, or over-deep input fails closed. | Pass | Malformed, trailing, empty, embedded-NUL, and 65+-level fixtures are preserved; valid unknown values remain editable. |
+| String escapes and structural characters cannot desynchronize parsing. | Pass | Portable cases cover escaped quotes, `]` in strings, nested arrays/objects, whitespace, Unicode-escaped target keys, and a UTF-8 BOM. |
+| Load and save cannot disagree about the target. | Pass | Production tests call both functions, and a file changed from an editable object to `permissions: []` after load is revalidated and refused at save. |
+| Existing safe-write and member refusal behavior remains intact. | Pass | All six member refusal cases, the full seven-stage suite, optimized build, warning compile, and static analysis complete as recorded below. |
+| The tests detect the original bug. | Pass | The investigation probe confirmed both production failures at `d26bb16`; the permanent production fixtures now require the opposite exact outcomes. |
 
 Safe optional manual validation should use a disposable `DRIFT_HOME` and
 workspace, never the user's real settings. Confirm a workspace member can be
@@ -239,15 +289,27 @@ added and removed when hooks, env, plugin configuration, and permissions rules
 coexist; compare the file before and after to verify only the intended span or
 insertion changed.
 
-## Validation performed during investigation
+## Validation performed
 
-- Disposable production probe described above — both wrong-object paths
-  confirmed; exit 0; all temporary artifacts removed.
-- `cmd /c tests\run_tests.bat` — `ALL CHECKS PASSED`: source lint, general
-  AddressSanitizer regressions, 13 name-metadata cases, 17 Claude-launcher
-  cases, 13 Vim-resolver cases, and `/W4 /WX` production compile.
-- Existing history and commit `715a0e2` inspected to separate this parent-path
-  defect from the already-fixed key/value token defect.
+- Investigation's disposable production probe — both wrong-object paths
+  confirmed against `d26bb16`; exit 0; every temporary artifact removed.
+- `cmd /c tests\run_tests.bat` — `ALL CHECKS PASSED`, seven stages: source lint,
+  general AddressSanitizer regressions, 19/19 production settings-JSON cases,
+  13/13 name-metadata cases, 17/17 Claude-launcher cases, 13/13 Vim-resolver
+  cases, and `/W4 /WX` production compile. The general suite includes 19 shared
+  locator cases and all six member-refusal cases.
+- `cmd /c build.bat` — optimized `/O2` Windows build succeeded; the ignored
+  validation executable was removed afterward.
+- `cl /analyze /W4 /wd4459 /c drift.c` — exit 0. It reported only the same three
+  diagnostics in unchanged code, shifted by removed scanner lines: the large
+  stack frame in `HandleOldHistory` and the two known parameter/global
+  shadowing sites in `GetSelectedRowPath` and `GetFilePath`. No diagnostic
+  intersects the parser or settings transaction.
+- `git diff --check` — passed.
+- `tests/run_tests.sh` could not start because this Windows host's Git Bash has
+  no `cc`. The shared parser nevertheless runs under MSVC AddressSanitizer in
+  the portable row-guard suite, and the Windows production-linked suite covers
+  the actual application transaction.
 
 ## Non-goals and residual risk
 
@@ -260,17 +322,48 @@ insertion changed.
   scope.
 - Drift will not validate the schema of settings it does not own. It will
   validate enough JSON structure and target types to prove safe byte offsets.
-- A hand-written JSON grammar is itself correctness-sensitive. A full grammar
-  fixture matrix, a nesting cap, production-linked tests, and independent patch
-  review are required residual controls.
+- The structural parser treats non-control high-bit bytes inside strings as
+  opaque and preserves them; it does not independently validate UTF-8 for
+  settings Drift does not own. Claude remains the schema/encoding authority.
+- The 64-level cap can refuse technically valid but exceptionally deep settings.
+  This is an intentional fail-closed resource bound, not a claimed Claude limit.
+- A hand-written JSON grammar is correctness-sensitive. The shared grammar
+  matrix, production-linked tests, bounded recursion, static analysis, and
+  independent patch review are the residual controls.
 
 ## User disposition
 
-Decision needed. The recommendation is option 2: implement the bounded shared
-path-aware locator, preserve all unrelated bytes, fail closed on ambiguous or
-invalid target structure, and add production-linked regression coverage. No
-production code or permanent regression test has been changed during this
-investigation.
+On 2026-07-25, the user approved option 2 and authorized its isolated
+implementation: use the bounded shared path-aware locator, preserve all
+unrelated bytes, fail closed on ambiguous or invalid target structure, and add
+production-linked regression coverage.
+
+## Independent review handoff
+
+The eligible reviewer must not be Codex. Read this record and the quality
+protocol, then locate the complete immutable commit set with:
+
+```text
+git log --all --reverse --format="%H %s" --grep="Audit-ID: DRIFT-004"
+```
+
+Inspect every resulting patch, especially `settings_json.h`, both production
+callers, the exact-output fixtures in `tests/settings_json_test.c`, and the
+portable shared-header cases. Run `cmd /c tests\run_tests.bat` and evaluate all
+twelve acceptance-criteria rows independently. Confirm the parser proves the
+direct root path before every edit, malformed/ambiguous files remain unchanged,
+the regression suite exercises production and detects both original failure
+shapes, and the commits contain no unrelated change. Report `Approved`,
+`Approved with residual risk`, or `Changes requested` in the protocol's full
+review format.
+
+Do not treat this fix as resolving DRIFT-005 concurrency or DRIFT-006 relative
+path semantics. The investigation commit is documentation only; implementation
+attribution begins with the production/test commit.
+
+## Review history
+
+No independent review rounds yet.
 
 ## Decision history
 
@@ -279,3 +372,6 @@ investigation.
 | 2026-07-25 | Codex | — | `Untriaged` | Recorded by the comprehensive application review as a possible wrong-object settings rewrite. |
 | 2026-07-25 | Codex | `Untriaged` | `Investigating` | Began tracing both array replacement and object insertion against the documented `permissions.additionalDirectories` contract. |
 | 2026-07-25 | Codex | `Investigating` | `Investigating` | Confirmed both wrong-object writes through production load/save, retained Medium severity, and recommended one bounded path-aware structural locator; user disposition required before implementation. |
+| 2026-07-25 | User | `Investigating` | `Fix planned` | Approved the recommended bounded path-aware locator, fail-closed structural outcomes, byte-preserving edits, and production-linked coverage. |
+| 2026-07-25 | Codex | `Fix planned` | `Fixing` | Began the isolated parser, load/save integration, and regression implementation. |
+| 2026-07-25 | Codex | `Fixing` | `Awaiting review` | Replaced all target searches with the shared bounded structural locator, added exact production-linked and portable regression coverage, and passed full, optimized, warning, static-analysis, and quality validation. |

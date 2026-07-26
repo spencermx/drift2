@@ -79,6 +79,7 @@
 #include <stdbool.h>
 #include <stdarg.h>
 #include <shellapi.h>
+#include "settings_json.h"
 
 #pragma comment(lib, "shell32.lib")
 
@@ -196,7 +197,6 @@ const char* AnchorFolder(const char* anchor);
 bool GetNameFile(char* out, const char* leaf);
 bool SetNameEntry(const char* leaf, const char* key, const char* name);
 void LoadWorkspaceNames();
-bool FindArraySpan(const char* buf, int* out_start, int* out_end);
 void LoadMembersFrom(const char* anchor);
 size_t AppendFmt(char* buf, size_t n, size_t cap, const char* fmt, ...);
 bool SaveMembersTo(const char* anchor);
@@ -2158,64 +2158,6 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
 // permissions.additionalDirectories -- the file Claude Code natively reads.
 // Editing splices only that array so any other settings in the file survive.
 
-// Locates the additionalDirectories [...] span. start/end index '[' and ']'.
-bool FindArraySpan(const char* buf, int* out_start, int* out_end) {
-    const char* KEY = "\"additionalDirectories\"";
-    const size_t key_len = strlen(KEY);
-
-    // Accept the key only where a key can actually appear -- outside any
-    // string, and followed by ':' then '['. A plain strstr also matches the
-    // name used as a *value*, and a plain strchr for '[' walks past a non-array
-    // value into whatever array comes next (typically permissions.allow), which
-    // SaveMembersTo would then overwrite with folder paths
-    const char* p = NULL;
-    bool in_string = false;
-    for (const char* c = buf; *c != '\0'; c++) {
-        if (in_string) {
-            if (*c == '\\' && c[1] != '\0') c++;
-            else if (*c == '"') in_string = false;
-            continue;
-        }
-        if (*c != '"') continue;
-        if (strncmp(c, KEY, key_len) != 0) {
-            in_string = true; // some other string; skip to its closing quote
-            continue;
-        }
-        const char* v = c + key_len;
-        while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
-        if (*v != ':') {
-            in_string = true; // the name appearing as a value, not as a key
-            continue;
-        }
-        v++;
-        while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
-        // A key whose value is not an array is left for the caller's insert
-        // branch rather than spliced over something else
-        if (*v != '[') return false;
-        p = v;
-        break;
-    }
-    if (p == NULL) return false;
-
-    const char* q = p + 1;
-    in_string = false;
-    while (*q != '\0') {
-        if (in_string) {
-            if (*q == '\\' && q[1] != '\0') q++;
-            else if (*q == '"') in_string = false;
-        } else {
-            if (*q == '"') in_string = true;
-            else if (*q == ']') {
-                *out_start = (int)(p - buf);
-                *out_end = (int)(q - buf);
-                return true;
-            }
-        }
-        q++;
-    }
-    return false;
-}
-
 void LoadMembersFrom(const char* anchor) {
     member_count = 0;
     json_block_reason = NULL;
@@ -2240,8 +2182,14 @@ void LoadMembersFrom(const char* anchor) {
         return;
     }
 
-    int s, e;
-    if (!FindArraySpan(json_buf, &s, &e)) return;
+    DriftSettingsJsonTarget target;
+    if (!DriftLocateSettingsJsonTarget(json_buf, (size_t)len, &target)) {
+        json_block_reason = "(settings.json structure cannot be edited safely)";
+        return;
+    }
+    if (target.action != DRIFT_SETTINGS_JSON_REPLACE_ARRAY) return;
+    int s = target.array_start;
+    int e = target.array_end;
     const char* p = json_buf + s + 1;
     const char* stop = json_buf + e;
     while (p < stop && member_count < MAX_MEMBERS) {
@@ -2375,6 +2323,7 @@ bool SaveMembersTo(const char* anchor) {
     // claude holding the file) fails fopen but not GetFileAttributes, which
     // asks about metadata rather than opening anything
     FILE* f = fopen(file, "rb");
+    bool file_exists = f != NULL;
     int len = 0;
     if (f != NULL) {
         len = (int)fread(json_buf, 1, sizeof(json_buf) - 1, f);
@@ -2401,45 +2350,45 @@ bool SaveMembersTo(const char* anchor) {
     }
     json_buf[len] = '\0';
 
+    DriftSettingsJsonTarget target = {0};
+    if (file_exists &&
+        !DriftLocateSettingsJsonTarget(json_buf, (size_t)len, &target)) {
+        json_block_reason = "(settings.json structure cannot be edited safely)";
+        free(arr);
+        return false;
+    }
+
     char* out = (char*)malloc((size_t)len + cap + 256);
     if (out == NULL) {
         free(arr);
         return false;
     }
 
-    int s, e;
-    if (len > 0 && FindArraySpan(json_buf, &s, &e)) {
+    if (file_exists && target.action == DRIFT_SETTINGS_JSON_REPLACE_ARRAY) {
         // Replace just the array; everything else in the file survives
-        memcpy(out, json_buf, s);
-        out[s] = '\0';
+        memcpy(out, json_buf, target.array_start);
+        out[target.array_start] = '\0';
         strcat(out, arr);
-        strcat(out, json_buf + e + 1);
-    } else if (len > 0) {
-        // No additionalDirectories yet: insert into the permissions object
-        // if there is one, otherwise into the root object
-        char* perm = strstr(json_buf, "\"permissions\"");
-        char* brace = perm != NULL ? strchr(perm, '{') : strchr(json_buf, '{');
-        if (brace == NULL) { // not JSON we understand -- leave it alone
-            free(arr);
-            free(out);
-            return false;
-        }
-        int at = (int)(brace - json_buf) + 1;
-        const char* look = json_buf + at;
-        while (*look == ' ' || *look == '\n' || *look == '\r' || *look == '\t') look++;
-        bool needs_comma = *look != '}';
+        strcat(out, json_buf + target.array_end + 1);
+    } else if (file_exists) {
+        // The shared structural locator proved both the parent object and the
+        // exact insertion brace. Text equal to either key elsewhere cannot
+        // influence this offset
+        bool in_permissions =
+            target.action == DRIFT_SETTINGS_JSON_INSERT_IN_PERMISSIONS;
+        int at = target.insert_at;
         memcpy(out, json_buf, at);
         out[at] = '\0';
         char insert[512];
-        if (perm != NULL) {
+        if (in_permissions) {
             snprintf(insert, sizeof(insert), "\n    \"additionalDirectories\": ");
         } else {
             snprintf(insert, sizeof(insert), "\n  \"permissions\": {\n    \"additionalDirectories\": ");
         }
         strcat(out, insert);
         strcat(out, arr);
-        if (perm == NULL) strcat(out, "\n  }");
-        if (needs_comma) strcat(out, ",");
+        if (!in_permissions) strcat(out, "\n  }");
+        if (target.needs_comma) strcat(out, ",");
         strcat(out, json_buf + at);
     } else {
         snprintf(out, cap + 256, "{\n  \"permissions\": {\n    \"additionalDirectories\": ");
