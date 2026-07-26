@@ -2,14 +2,14 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Investigating`
+**Current status:** `Awaiting review`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** Medium
 **Final severity:** Medium
-**Primary locations:** `drift.c:LoadMembersFrom`, `drift.c:FindMember`,
-`drift.c:ApplyMemberChange`, `drift.c:ToggleMemberUnderCursor`,
-`drift.c:HandleInput` (manifest jump), `drift.c:ChangeCurrentDirectory`
-**Implemented by:** —
+**Primary locations:** `drift.c:ResolveMemberPath`, `drift.c:LoadMembersFrom`,
+`drift.c:FindMember`, `drift.c:ApplyMemberChange`, `drift.c:JumpToMemberAt`,
+`tests/membership_path_test.c`, `tests/run_tests.bat`
+**Implemented by:** Codex
 **Reviewed by:** —
 **Decision owner:** User unless explicitly delegated
 
@@ -169,7 +169,7 @@ not structurally corrupted.
    while leaving `members` in the form that `SaveMembersTo` already serializes.
    This fixes behavior without converting portable entries to absolute JSON.
 
-## Recommended design
+## Approved design
 
 1. Add one length-checked, lexical `ResolveMemberPath(anchor, stored, out)`
    helper. It must never consult or change the process current directory and
@@ -208,27 +208,84 @@ known launch anchor without performing filesystem canonicalization that could
 follow links, require access, or turn a nonexistent but valid configured path
 into an editing failure.
 
-## Acceptance criteria and regression plan
+## Implementation
 
-| Criterion | Planned evidence |
-|---|---|
-| `..\shared`, `.\child`, bare names, and forward-slash relatives resolve from the workspace anchor, never Drift's process cwd. | Production-linked cases vary the process cwd and require the same anchor-derived output. |
-| The absolute browser path for a relative row is recognized as already present. | Load a relative fixture, call production `FindMember` with the resolved absolute target, and require a match. |
-| Adding an equivalent absolute path is idempotent and byte-preserving. | `ApplyMemberChange(ADD)` must return `MEMBER_CHANGE_NO_CHANGE` and leave the compact relative JSON exact. |
-| Removing an absolute path revokes all equivalent relative/absolute rows. | Seed semantic duplicates, remove through the production transaction, and require no equivalent row in the saved array. |
-| Manifest Enter navigates to the anchor-derived target. | Plant distinct markers at the anchor and process-cwd interpretations and require only the anchor marker after the production jump path. |
-| Surviving relative spellings remain relative after another member changes. | Add/remove an unrelated path and inspect the serialized target value plus unrelated JSON bytes. |
-| Fully qualified drive, UNC, and Wine host paths keep their established behavior. | Focused resolver and round-trip fixtures cover native and `DRIFT_HOST_DRIVE` modes. |
-| Ambiguous drive-relative, unanchorable root-relative, invalid, and overlong results fail closed and visibly. | Each fixture preserves settings byte-for-byte, leaves no temp file, and returns a typed/blocking outcome. |
-| DRIFT-004 structural preservation remains intact. | All production settings JSON tests and shared locator cases pass unchanged. |
-| DRIFT-005 serialization and rebasing remain intact. | All 13 membership-concurrency cases, including real child processes, pass unchanged. |
-| The permanent regression detects the original bug. | Run the new production-linked test against the pre-fix source or use a negative control that restores raw textual identity/process-cwd jumping. |
-| Investigation and tests never touch real configuration. | Fixtures use a unique `%TEMP%` workspace and verify cleanup. |
+- `ResolveMemberPath` classifies and normalizes a configured member without
+  opening it. Ordinary relative values are first combined with the workspace
+  anchor; only that fully qualified candidate reaches `GetFullPathNameA`, so
+  the process working directory cannot affect the result. Drive-absolute, UNC,
+  and deterministic drive-rooted forms remain supported. Drive-relative,
+  unanchorable root-relative, empty, and overlong forms fail closed.
+- `LoadMembersFrom` retains the active workspace in `member_anchor`, leaves each
+  decoded setting in its authored form, and validates that every row has a safe
+  operational resolution. Invalid values remain visible but set a specific
+  blocking reason, preserving the original settings bytes on attempted edits.
+  Wine's existing `/host/path` conversion still runs before validation; a
+  conversion that cannot fit is now blocking rather than reinterpreted.
+- `FindMember` first prefers an exact configured spelling, then compares
+  anchor-resolved forms. Browser paths therefore recognize existing relative
+  grants without changing their JSON representation.
+- `ApplyMemberChange` validates the requested path under the DRIFT-005 lock. An
+  equivalent add returns `MEMBER_CHANGE_NO_CHANGE` before publication. One
+  explicit removal compacts away every operationally equivalent row, repairing
+  relative/absolute duplicates created by older Drift versions while retaining
+  the exact spelling and order of every survivor.
+- `JumpToMemberAt` resolves the selected row against `edit_workspace` before
+  calling the browser. An unsafe resolution keeps manifest focus and produces
+  visible refusal instead of passing a relative path to Win32 enumeration.
+- `tests/membership_path_test.c` includes the production translation unit and
+  exercises the real load, locked mutation, save, lookup, and jump paths below
+  one unique `%TEMP%` tree. `tests/run_tests.bat` adds it as AddressSanitizer
+  stage 4 and expands the complete suite from eight to nine stages.
 
-The proposed permanent suite is a focused Windows production-linked file such
-as `tests/membership_path_test.c`, added to `tests/run_tests.bat`. Portable pure
-path-resolution cases may also be added to the general suite if the helper can
-be isolated without duplicating production logic.
+## Acceptance criteria and implementer evidence
+
+| Criterion | Result | Evidence |
+|---|---|---|
+| `..\shared`, `.\child`, bare names, and forward-slash relatives resolve from the workspace anchor, never Drift's process cwd. | Pass | The focused resolver case requires four spelling variants to equal independently constructed anchor targets. The production jump case changes the process CWD to a distinct fixture and still requires `current_directory` to equal the anchor-derived target. |
+| The absolute browser path for a relative row is recognized as already present. | Pass | A real settings fixture loads `..\shared`; production `FindMember` receives the independently built absolute target and returns row 0 while the stored row remains relative. |
+| Adding an equivalent absolute path is idempotent and byte-preserving. | Pass | `ApplyMemberChange(MEMBER_CHANGE_ADD)` returns `MEMBER_CHANGE_NO_CHANGE`; the compact settings fixture, including unrelated `env`, remains byte-for-byte identical and no temp file exists. |
+| Removing an absolute path revokes all equivalent relative/absolute rows. | Pass | A fixture contains `..\shared`, its absolute spelling, `../shared/`, and an unrelated row. One production removal leaves only the unrelated row and no lookup match for the target. |
+| Manifest Enter navigates to the anchor-derived target. | Pass | `JumpToMemberAt` is called with `..\shared` after changing the process CWD. It stores the absolute anchor target in `current_directory` and releases manifest focus. A marker makes the intended target an enumeratable real directory. |
+| Surviving relative spellings remain relative after another member changes. | Pass | A production add and removal of an unrelated absolute path leave the sole member exactly `../shared/`; the serialized value and unrelated `env.KEEP` key remain present. |
+| Fully qualified drive, UNC, and Wine host paths keep their established behavior. | Pass | Resolver cases cover drive-rooted, drive-absolute, and UNC normalization. A `DRIFT_HOST_DRIVE=Z:` load/save round trip keeps `/Users/example/project` host-style and `../shared/` relative in JSON. |
+| Ambiguous drive-relative, unanchorable root-relative, invalid, and overlong results fail closed and visibly. | Pass | Direct cases reject `C:folder` and a root-relative value under a UNC anchor. Empty and overlong settings fixtures set `MEMBER_PATH_BLOCK_REASON`; locked operations return `MEMBER_CHANGE_SETTINGS_BLOCKED`, preserve exact bytes, and leave no temp. Production callers map that typed result to visible feedback. |
+| DRIFT-004 structural preservation remains intact. | Pass | All 19 production settings JSON cases and the shared locator/refusal cases pass unchanged under AddressSanitizer. |
+| DRIFT-005 serialization and rebasing remain intact. | Pass | All 13 membership-concurrency cases pass unchanged, including two real child writers, bounded contention, crash release, stale rebase, and source conflict. |
+| The permanent regression detects the original bug. | Pass | The pre-fix production probe recorded in the investigation commit demonstrates all four wrong outcomes. The permanent suite requires their opposites through production APIs and also requires resolver/jump wiring absent from the pre-fix source. |
+| Investigation and tests never touch real configuration. | Pass | Both probe and permanent fixtures use unique `%TEMP%` roots. The focused suite completed cleanup; a post-run search found no `drift-member-path-test-*` directory. |
+
+## Validation performed
+
+- Disposable pre-fix production-linked AddressSanitizer probe recorded at
+  investigation commit `7b17f57` — relative lookup failed, an equivalent
+  absolute duplicate was published, removing it retained the relative grant,
+  and manifest navigation used the process-CWD interpretation. Exit 0 meant
+  the negative control reproduced every expected failure; all artifacts were
+  removed.
+- `cmd /c tests\run_tests.bat` — `ALL CHECKS PASSED`, nine stages. The new
+  DRIFT-006 production-linked suite passes 12/12 cases under AddressSanitizer;
+  the unchanged coverage includes 19/19 DRIFT-004 production settings cases,
+  13/13 DRIFT-005 membership-concurrency cases, 13/13 name metadata cases,
+  17/17 Claude launcher cases, 13/13 Vim resolver cases, general regressions,
+  source lint, and `/W4 /WX` production compilation.
+- `cmd /c build.bat` — optimized `/O2` application build succeeded. The ignored
+  executable produced by this validation was removed afterward.
+- `cl /analyze /W4 /wd4459 /c drift.c` — exit 0. It reports only the three
+  established diagnostics in unchanged code: the `HandleOldHistory` stack
+  frame and parameter/global shadowing in `GetSelectedRowPath` and
+  `GetFilePath`; no diagnostic points into the DRIFT-006 change.
+- `git diff --check` — passed apart from Git's informational LF-to-CRLF working
+  tree notices.
+- Post-run artifact check — no `drift-member-path-test-*` directory or
+  generated `drift.exe` remains.
+
+Safe optional manual validation may create a disposable workspace whose
+settings contain `../sibling/`, launch Drift from a different directory, and
+confirm that the sibling is already marked, Space removes the relative grant,
+and manifest Enter opens the sibling. Do not use a real workspace for
+failure-path validation; the automated suite already covers deterministic
+ambiguous and overlong refusals.
 
 ## Compatibility, security, and error paths
 
@@ -270,11 +327,48 @@ Lexical equality can still differ from filesystem-object identity when links or
 aliases are involved. That limitation does not justify retaining the confirmed
 anchor/process-cwd mismatch for ordinary documented relative paths.
 
+The implementation was validated against current documented Claude behavior,
+but the automated suite does not start a real Claude process and interrogate
+its internal permission roots. Windows case-insensitive comparison is retained;
+case-sensitive host identity under Wine and other alias forms remain owned by
+DRIFT-029 rather than being broadened into this fix.
+
 ## User disposition
 
-Pending. No production code or permanent regression test has been changed.
-The recommended anchor-aware, spelling-preserving design requires explicit user
-approval before implementation.
+On 2026-07-26, the user approved the recommended anchor-aware operational
+identity, preservation of configured relative spellings, semantic duplicate
+removal, visible fail-closed behavior for ambiguous/unrepresentable paths, and
+production-linked regression coverage, and authorized implementation.
+
+## Independent review handoff
+
+The eligible reviewer must not be Codex. Read this file and
+`quality/README.md`, then locate the complete immutable commit set with:
+
+```text
+git log --all --reverse --format="%H %s" --grep="Audit-ID: DRIFT-006"
+```
+
+Inspect both the investigation and implementation commits plus the surrounding
+membership transaction. Confirm independently that raw JSON strings survive,
+that only fully anchored candidates reach `GetFullPathNameA`, and that browser
+lookup, add, all-equivalent removal, and manifest jump share the same identity.
+Pay particular attention to drive/UNC/root/drive-relative classification,
+trailing-root handling, Wine conversion, length bounds, empty values, and
+failure feedback. Verify that the removal compaction cannot retain a semantic
+duplicate or disturb an unrelated row, and that no new save path bypasses the
+DRIFT-005 lock/source checks.
+
+Run `cmd /c tests\run_tests.bat`, evaluate all twelve acceptance rows rather
+than treating a green suite as approval, and inspect the pre-fix reproduction
+evidence. Confirm scope: this commit must not claim filesystem-object identity
+from links/aliases (DRIFT-029), failed-read safety (DRIFT-034), or a general
+`MAX_PATH` redesign. Report `Approved`, `Approved with residual risk`, or
+`Changes requested` using the required quality workflow format.
+
+## Review history
+
+No independent review rounds have been recorded yet.
 
 ## Decision history
 
@@ -283,3 +377,6 @@ approval before implementation.
 | 2026-07-25 | Codex | — | `Untriaged` | Recorded by the comprehensive application review as a possible relative-path resolution and identity mismatch. |
 | 2026-07-26 | Codex | `Untriaged` | `Investigating` | Began contract research, production control-flow tracing, and disposable relative-path reproduction; no production fix authorized. |
 | 2026-07-26 | Codex | `Investigating` | `Investigating` | Confirmed wrong-base navigation, semantic duplicate publication, and ineffective browser removal with a production-linked AddressSanitizer probe; retained Medium severity and recommended anchor-aware operational identity that preserves relative JSON spelling; awaiting user disposition. |
+| 2026-07-26 | User | `Investigating` | `Fix planned` | Approved anchor-aware operational identity, preservation of relative JSON spelling, removal of equivalent duplicates, fail-closed ambiguous/overlong handling, and production-linked tests. |
+| 2026-07-26 | Codex | `Fix planned` | `Fixing` | Began the isolated resolver, comparison/removal/navigation wiring, and regression implementation. |
+| 2026-07-26 | Codex | `Fixing` | `Awaiting review` | Implemented anchor-aware operational identity with raw-spelling preservation, all-equivalent removal, safe manifest navigation, typed fail-closed behavior, and 12 production-linked regression cases; all nine validation stages pass. |
