@@ -21,6 +21,8 @@ No additional process explanation from the user should be required.
 - `README.md` — this operating protocol; always read it first.
 - `TRACKER.md` — the compact canonical index of every reported issue: ID,
   severity, status, short description, primary location, and disposition.
+- `validate.ps1` — read-only structural validation for the tracker, issue
+  records, links, workflow state, review eligibility, and Git audit trailers.
 - `issues/DRIFT-NNN.md` — the permanent detailed record for one bug. It is
   created when investigation begins, then grows to contain analysis, decisions,
   fix design, commits, tests, and independent-review results.
@@ -82,6 +84,8 @@ the implementer to approve its own work.
     implementer when another contributor makes a follow-up change.
 13. An implementer cannot independently approve that item. It must be reviewed
     by an identity absent from the item's `Implemented by` field.
+14. Run `quality/validate.ps1` at the workflow checkpoints below. A passing
+    application test suite does not substitute for consistent audit records.
 
 ## Attribution
 
@@ -133,6 +137,31 @@ Untriaged -> Investigating -> Fix planned -> Fixing
 Valid exits are `Not a bug`, `Won't fix`, `Deferred`, and `Accepted risk`.
 Independent review can send `Awaiting review` back to `Fixing` when feedback is
 accepted or to `Decision needed` when a material finding is disputed.
+
+## Workflow validation
+
+Run the read-only validator from the repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File quality\validate.ps1
+```
+
+Run it at all of these checkpoints:
+
+1. Before beginning an investigation, implementation, or independent review,
+   so pre-existing record failures are not silently attributed to new work.
+2. After updating code and quality records but before committing them.
+3. Immediately after each investigation, implementation, review, or quality-
+   maintenance commit, so trailer discovery and the committed state are both
+   checked.
+
+The validator checks tracker IDs and ordering, allowed severities and statuses,
+the one-active-item rule, required issue files, tracker/issue status and
+attribution agreement, relative Markdown links, immutable audit snapshots,
+review eligibility, and required `Audit-ID`, `Implemented-by`, and
+`Reviewed-by` commit trailers. It does not judge technical correctness,
+severity, product intent, or whether a test meaningfully covers production;
+those remain human or reviewer responsibilities.
 
 ## 1. Reporting a new bug
 
@@ -326,12 +355,17 @@ particular participant still being present:
   between systems by hand.
 
 A reviewer recording its own result is bound by one limit that keeps the record
-auditable. It appends its own review round and updates only status,
-`Reviewed by`, and decision-history fields. It never edits, softens, or deletes
-implementer-authored sections such as the agreed design, acceptance criteria, or
-implementer evidence — even where the review found them inaccurate. That
-disagreement belongs in the review round, where both positions stay visible and
-separately attributed.
+auditable. It appends its own review round and may update only these existing
+fields:
+
+- In the issue file: `Current status`, `Reviewed by`, and decision history.
+- In `TRACKER.md`: `Status`, `Reviewed by`, and the compact `Decision / fix`
+  summary needed to reflect the recorded verdict.
+
+It never edits, softens, or deletes implementer-authored sections such as the
+agreed design, acceptance criteria, or implementer evidence — even where the
+review found them inaccurate. That disagreement belongs in the review round,
+where both positions stay visible and separately attributed.
 
 Residual risk that the reviewer discovered, rather than the implementer
 recorded, is preserved in that reviewer's round under the reviewer's name. Do
@@ -341,6 +375,19 @@ A reviewer that opens a new tracker ID for a separate concern it found is acting
 as a bug finder for that ID and follows section 1, including creating the issue
 file when the report carries evidence that would otherwise be lost. It does not
 investigate or fix that new item in the same pass.
+
+If the concern matches an existing ID, do not open a duplicate. Append a clearly
+attributed `Cross-linked observations` entry to that existing issue and add a
+same-status decision-history row recording the new evidence. Do not investigate
+it, change its status, or rewrite its earlier sections during the review. The
+review-record commit repeats `Audit-ID:` for the cross-linked issue so its
+history remains discoverable.
+
+When one commit records a verdict for one ID and reports or cross-links evidence
+for another, its body must label the role of every ID explicitly. `Reviewed-by:`
+applies only to the issue that actually received the verdict; the cross-linked
+issue's `Reviewed by` field remains unchanged. Repeat `Audit-ID:` once for every
+issue record changed.
 
 Whoever records the result applies the verdict as follows:
 
@@ -352,6 +399,39 @@ Whoever records the result applies the verdict as follows:
 - `Changes requested`: record the reviewer and verdict. If every material
   finding is accepted, return the item to `Fixing`. If any material finding is
   disputed, use `Decision needed` and follow section 7.
+
+Review-record commit format:
+
+```text
+Record DRIFT-NNN independent review: concise verdict
+
+Review:
+<reviewer, complete commit set, verdict, findings, and acceptance-criterion
+results; distinguish criterion-row counts from production-call-site counts>
+
+Tests:
+<commands, results, and reviewer-added checks>
+
+Residual risk:
+<reviewer-discovered limitations or "None identified">
+
+Cross-linked reports:
+<DRIFT-MMM: evidence recorded only; not reviewed, investigated, or moved from
+its current status; omit this section when there are none>
+
+Audit scope:
+<fields and files changed; confirm production code, tests, and implementer-
+authored sections were not modified>
+
+Audit-ID: DRIFT-NNN
+Audit-ID: DRIFT-MMM
+Reviewed-by: Claude
+```
+
+Omit the second audit ID when nothing was cross-linked. A harmless wording typo
+in an immutable review commit does not require a bridge when the canonical
+issue record is unambiguous; bridge commits are for broken discovery,
+attribution, coupling, or verdict records, not cosmetic history rewriting.
 
 ## 7. Disagreement and final decisions
 
