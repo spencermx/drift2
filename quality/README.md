@@ -258,8 +258,9 @@ is correct.
 6. Run every required test and add safe, read-only checks where useful.
 7. Verify that regression coverage exercises the production behavior and would
    detect reintroduction of the bug.
-8. Do not edit code, commits, issue records, or statuses unless the user explicitly
-   asks. Report the verdict in the conversation.
+8. Never edit production code, tests, or existing commits, and never rewrite
+   another participant's issue-record sections. Report the verdict in the
+   conversation, then record it as section 6 directs.
 
 Useful commands:
 
@@ -284,8 +285,36 @@ failure mode and the chosen design independently.
 
 ## 6. Recording review results
 
-After the reviewer reports in the conversation, the implementing system or
-maintainer updates the files; the reviewer does not need to do so.
+The reviewer always reports its verdict in the conversation. Writing that
+verdict into the files is a separate step, and it must never depend on one
+particular participant still being present:
+
+- When the implementing system or maintainer is still in the loop, it updates
+  the files and the reviewer does not need to do so.
+- When the reviewer runs in its own session and no implementer is present to
+  record the result, the reviewer records its own round rather than leaving the
+  item stranded at `Awaiting review`. Routing a review to a separate system is
+  itself the request for this; the user should not have to relay findings
+  between systems by hand.
+
+A reviewer recording its own result is bound by one limit that keeps the record
+auditable. It appends its own review round and updates only status,
+`Reviewed by`, and decision-history fields. It never edits, softens, or deletes
+implementer-authored sections such as the agreed design, acceptance criteria, or
+implementer evidence — even where the review found them inaccurate. That
+disagreement belongs in the review round, where both positions stay visible and
+separately attributed.
+
+Residual risk that the reviewer discovered, rather than the implementer
+recorded, is preserved in that reviewer's round under the reviewer's name. Do
+not merge it into the implementer's residual-risk section.
+
+A reviewer that opens a new tracker ID for a separate concern it found is acting
+as a bug finder for that ID and follows section 1, including creating the issue
+file when the report carries evidence that would otherwise be lost. It does not
+investigate or fix that new item in the same pass.
+
+Whoever records the result applies the verdict as follows:
 
 - `Approved`: set the tracker item and bug file to `Verified`, and add the
   reviewer identity, verdict, commit set, and test evidence to the bug file's
