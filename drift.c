@@ -1919,53 +1919,87 @@ void HandleDeleteSession() {
     if (session_count == 0) return;
     SessionEntry* sel = &sessions[session_selected];
 
-    CONSOLE_SCREEN_BUFFER_INFO info;
-    if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
-    int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
-    int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
-
-    int popup_w = 44;
-    int popup_h = 7;
-    if (popup_w > screen_width) popup_w = screen_width;
-    if (popup_w < 20 || screen_height < popup_h) return;
-
-    CHAR_INFO* popup = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
-    if (popup == NULL) return;
-
-    for (int i = 0; i < popup_w * popup_h; i++) {
-        popup[i].Char.UnicodeChar = L' ';
-        popup[i].Attributes = white;
-    }
-    popup[0].Char.UnicodeChar = BOX_TOP_LEFT;
-    popup[popup_w - 1].Char.UnicodeChar = BOX_TOP_RIGHT;
-    int bottom = (popup_h - 1) * popup_w;
-    popup[bottom].Char.UnicodeChar = BOX_BOTTOM_LEFT;
-    popup[bottom + popup_w - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
-    for (int c = 1; c < popup_w - 1; c++) {
-        popup[c].Char.UnicodeChar = BOX_HORIZONTAL;
-        popup[bottom + c].Char.UnicodeChar = BOX_HORIZONTAL;
-    }
-    for (int r = 1; r < popup_h - 1; r++) {
-        popup[r * popup_w].Char.UnicodeChar = BOX_VERTICAL;
-        popup[r * popup_w + popup_w - 1].Char.UnicodeChar = BOX_VERTICAL;
-    }
-    WriteToBuffer(popup, popup_w, 1, 2, "Delete session?", red);
-    WriteToBufferCP(popup, popup_w, 3, 2, sel->name, white, CP_UTF8);
-    WriteToBuffer(popup, popup_w, 5, 2, "[Y] Yes - Recycle Bin  [N] No", white);
-
-    int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
-    int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
-    COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
-    COORD origin = { 0, 0 };
-    SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
-                          (SHORT)(start_col + popup_w - 1), (SHORT)(start_row + popup_h - 1) };
-    WriteConsoleOutputW(hAlt, popup, buffer_size, origin, &region);
-    free(popup);
-
+    // Keep the destructive key armed only while a complete prompt has been
+    // painted for the current window. Console reflow wipes one-shot overlays;
+    // the nested input loop owns resize events, so the main loop cannot repair
+    // the screen until this handler returns.
+    bool repaint = true;
     while (1) {
+        if (repaint) {
+            CONSOLE_SCREEN_BUFFER_INFO info;
+            if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
+            int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
+            int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
+
+            int popup_w = 44;
+            const int popup_h = 7;
+            if (popup_w > screen_width) popup_w = screen_width;
+            // Below this width even the useful confirmation labels no longer
+            // fit. Cancel rather than accept Y behind missing content.
+            if (popup_w < 20 || screen_height < popup_h) return;
+
+            CHAR_INFO* popup = (CHAR_INFO*)malloc(
+                popup_w * popup_h * sizeof(CHAR_INFO));
+            if (popup == NULL) return;
+
+            for (int i = 0; i < popup_w * popup_h; i++) {
+                popup[i].Char.UnicodeChar = L' ';
+                popup[i].Attributes = white;
+            }
+            popup[0].Char.UnicodeChar = BOX_TOP_LEFT;
+            popup[popup_w - 1].Char.UnicodeChar = BOX_TOP_RIGHT;
+            int bottom = (popup_h - 1) * popup_w;
+            popup[bottom].Char.UnicodeChar = BOX_BOTTOM_LEFT;
+            popup[bottom + popup_w - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
+            for (int c = 1; c < popup_w - 1; c++) {
+                popup[c].Char.UnicodeChar = BOX_HORIZONTAL;
+                popup[bottom + c].Char.UnicodeChar = BOX_HORIZONTAL;
+            }
+            for (int r = 1; r < popup_h - 1; r++) {
+                popup[r * popup_w].Char.UnicodeChar = BOX_VERTICAL;
+                popup[r * popup_w + popup_w - 1].Char.UnicodeChar = BOX_VERTICAL;
+            }
+            WriteToBuffer(popup, popup_w, 1, 2, "Delete session?", red);
+            WriteToBufferCP(popup, popup_w, 3, 2, sel->name, white, CP_UTF8);
+            WriteToBuffer(popup, popup_w, 5, 2,
+                          "[Y] Yes - Recycle Bin  [N] No", white);
+
+            int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
+            int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
+            COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
+            COORD origin = { 0, 0 };
+            SMALL_RECT requested = {
+                (SHORT)start_col,
+                (SHORT)start_row,
+                (SHORT)(start_col + popup_w - 1),
+                (SHORT)(start_row + popup_h - 1)
+            };
+            SMALL_RECT written = requested;
+            BOOL output_ok = WriteConsoleOutputW(
+                hAlt, popup, buffer_size, origin, &written);
+            free(popup);
+
+            // WriteConsoleOutputW reports its actual (possibly clipped)
+            // destination through written. Partial output is not a visible
+            // confirmation and must fail closed just like a write failure.
+            if (!output_ok ||
+                written.Left != requested.Left ||
+                written.Top != requested.Top ||
+                written.Right != requested.Right ||
+                written.Bottom != requested.Bottom) {
+                return;
+            }
+            repaint = false;
+        }
+
         INPUT_RECORD input;
         DWORD events;
         if (!ReadConsoleInput(hIn, &input, 1, &events)) break;
+        if (input.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            DrawScreen();
+            repaint = true;
+            continue;
+        }
         if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) continue;
 
         WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
