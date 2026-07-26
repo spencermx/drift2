@@ -2,7 +2,7 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Awaiting review`
+**Current status:** `Verified`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** Medium
 **Final severity:** Medium
@@ -11,7 +11,7 @@ Tracker: [`TRACKER.md`](../TRACKER.md)
 `drift.c:SaveMembersTo`, the three membership UI callers, and
 `tests/membership_concurrency_test.c`
 **Implemented by:** Codex
-**Reviewed by:** —
+**Reviewed by:** Claude: approved with residual risk
 **Decision owner:** User unless explicitly delegated
 
 ## Trigger and impact
@@ -332,7 +332,140 @@ residual risk`, or `Changes requested` using the workflow's required format.
 
 ## Review history
 
-No independent review rounds yet.
+### Round 1 — Claude, 2026-07-26
+
+- **Reviewer:** `Claude` (Opus 5). Absent from `Implemented by`, so eligible.
+- **Commit set:** `a084c52` "Investigate DRIFT-005: confirm concurrent membership
+  loss" (documentation only) and `e47c219` "Fix DRIFT-005: serialize workspace
+  membership changes". `git log --all --reverse --format="%H %s"
+  --grep="Audit-ID: DRIFT-005"` returns these two and no others.
+- **Verdict:** `Approved with residual risk`.
+
+**Acceptance criteria:** eleven of twelve pass as claimed. Row 8 ("the lock spans
+load through publication and every caller uses it") is correct in the
+implementation but is **not established by the cited evidence** — see finding 2.
+Row 12's headline sentence ("failures never claim success") overstates what was
+verified, though its own evidence list does not include the branch that
+contradicts it — see finding 1. Neither requires a change to this commit set.
+
+**Tests run by the reviewer:**
+
+- `cmd /d /c tests\run_tests.bat` — `ALL CHECKS PASSED`, eight stages, exit 0,
+  including 13/13 membership-concurrency cases, 19/19 DRIFT-004 settings cases,
+  13/13 name-metadata cases, 17/17 Claude launcher, 13/13 Vim resolver, and the
+  `/W4 /WX` compile. DRIFT-001 through DRIFT-004 coverage is unaffected.
+- `build.bat` — optimized `/O2` build succeeded; `drift.exe` removed afterward.
+- `cl /analyze /W4 /wd4459 /c drift.c` — exit 0. Three diagnostics, all in code
+  this fix does not touch: C6262 at `drift.c:4305` and C6244 at `drift.c:4571`
+  and `drift.c:4587`. No `GetTickCount` wrap warning remains, confirming the
+  `GetTickCount64` change the record describes.
+
+**Reviewer-added mutation testing** (throwaway copies outside the repository;
+no repository file was modified). Six mutants of the transaction were compiled
+against the permanent concurrency suite:
+
+1. *Remove the in-transaction `LoadMembersFrom` rebase* — the DRIFT-005 defect
+   itself. **Caught**, 7 of 13 cases fail. This is the decisive negative
+   control.
+2. *Release the lock immediately before `SaveMembersTo`* — restores a
+   lost-update window while keeping the load serialized. **NOT caught**; the
+   entire suite passes. See finding 2.
+3. *Remove the `MemberSourceMatches` conflict check* — **caught**.
+4. *Make the lock non-exclusive (`FILE_SHARE_READ | FILE_SHARE_WRITE`)* —
+   **caught** by both real cross-process cases, confirming they genuinely
+   exercise Win32 sharing rather than simulating it.
+5. *Remove the `MAX_MEMBERS` guard* — **caught**, via an AddressSanitizer abort
+   on the out-of-bounds `strcpy`.
+6. *Remove the idempotent-add short circuit* — **caught**.
+
+**Independent verification of specific claims:**
+
+- All production mutation routing was enumerated by whole-file search:
+  `SaveMembersTo` is called exactly once, at `drift.c:2609`, between lock
+  acquisition at `drift.c:2569` and `CloseHandle` at `drift.c:2625`. The three
+  callers at `drift.c:2653`, `drift.c:2670`, and `drift.c:2845` all go through
+  `ApplyMemberChange`. The remaining `LoadMembersFrom` at `drift.c:2685` is
+  `EnterEditMode`'s read-only display load.
+- Every exit path from `ApplyMemberChange` reaches `CloseHandle(lock)`: all five
+  early returns use `goto done`, and the save path falls through to it.
+- No user-blocking call happens while the lock is held. `ReportMemberChangeFailure`
+  and `NotifyAndWait` run in the callers, after the handle is closed, so a
+  modal prompt cannot pin the lock.
+- `RememberMemberSource(arr, strlen(arr), true)` after a successful save stores
+  exactly the bytes the splice wrote, so a fresh parse of the new file yields an
+  identical span in all three publication shapes (replace, insert-in-permissions,
+  insert-permissions, and absent-file skeleton). A second operation in the same
+  process therefore cannot false-conflict.
+- `OPEN_ALWAYS` with `FILE_ATTRIBUTE_HIDDEN` is safe on an already-existing
+  non-hidden lock file: Win32 applies `dwFlagsAndAttributes` only on creation,
+  so this does not repeat the documented `CREATE_ALWAYS` hidden-file
+  `ERROR_ACCESS_DENIED` trap.
+- DRIFT-006 and DRIFT-033 are not silently treated as fixed. No relative-path
+  resolution and no name-metadata serialization were added; both tracker rows
+  remain `Untriaged`.
+
+**Findings — no defect introduced by this change. Three items:**
+
+1. *A transaction whose load cannot read an existing `settings.json` publishes a
+   list built from zero members and reports success.* `LoadMembersFrom`
+   (`drift.c:2244-2251`) distinguishes absent from unreadable but acts only on
+   the absent case, returning with `member_count == 0`,
+   `json_block_reason == NULL`, and `member_source_known == false`.
+   `MemberSourceMatches` (`drift.c:2210`) then returns `true` unconditionally
+   for an unknown source, so DRIFT-005's new defense disables itself on exactly
+   this path. A deterministic probe that fails only the transaction's own
+   `fopen` and lets the save's re-read succeed returned
+   `MEMBER_CHANGE_SAVED` while deleting all three pre-existing members.
+   **This is not a regression:** the identical loss reproduces against
+   `git show 6aea09b:drift.c`, before this transaction existed. Because the root
+   cause is independent of the stale-snapshot race this item fixes — a failed
+   read treated as an empty list, rather than two successful readers racing —
+   rule 3 requires a separate ID rather than folding it in, and rule 6 forbids
+   mixing it into these commits. Filed as
+   [DRIFT-034](DRIFT-034.md) with the reproduction preserved. Worth noting that
+   [DRIFT-003](DRIFT-003.md) fixed this exact shape for name metadata;
+   `LoadMembersFrom` adopted only the absence half of that pattern.
+2. *The lock's most important property is untested.* Acceptance row 8 claims the
+   lock spans load through publication, and cites the source-text wiring guard.
+   Mutant 2 above releases the lock immediately before `SaveMembersTo` — which
+   reopens a real lost-update window between two cooperating Drift processes —
+   and the whole suite still passes, wiring guard included. The implementation
+   is correct; the coverage cannot tell correct from incorrect here. A test that
+   holds the parent lock and asserts a child cannot publish *while the parent is
+   mid-transaction* would close this.
+3. *The wiring guard checks token counts, not the invariant it is named for.*
+   `TestProductionWiring` (`tests/membership_concurrency_test.c:362-390`) counts
+   occurrences of `SaveMembersTo(`, `ApplyMemberChange(`, and
+   `AcquireMemberLock(` and asserts that `CloseHandle(lock);` and the lock path
+   appear somewhere. It cannot see where any call sits relative to the lock, and
+   would fail on a harmless rename or a comment mentioning a token. This is the
+   same brittleness class raised in DRIFT-002 Round 1; effective as a tripwire,
+   but not a proof of routing.
+
+**Checked and dismissed:** the unlocked `LoadMembersFrom` on the lock-failure
+path is a display refresh only and cannot publish; a workspace whose
+`permissions` object gains no array between load and save is correctly treated
+as matching, because inserting into it loses nothing; quick-add still leaves the
+process globals describing the quick-add target rather than `edit_workspace`,
+but that is pre-existing, display-only, and harmless to the transaction because
+every operation reloads its own anchor first; the 1.5 s bounded wait with 25 ms
+retries cannot freeze the TUI indefinitely; `GetTickCount64` subtraction is
+wrap-safe; and `strcpy(members[member_count], path)` is bounded by the
+`strlen(path) >= MAX_PATH` guard at the top of `ApplyMemberChange`.
+
+**Scope check:** clean. `e47c219` touches only the membership transaction and
+its callers in `drift.c`, adds `tests/membership_concurrency_test.c`, adjusts
+`tests/settings_json_test.c` to establish the absent-file source through the
+real loader, inserts one stage in `tests/run_tests.bat`, documents the lock
+artifact in `README.md`, and updates this issue file and its own tracker row.
+`a084c52` is documentation only. No unrelated cleanup or refactoring.
+
+**Resolution:** approved with residual risk. No finding requires a change to
+this commit set: finding 1 is a pre-existing independent defect now tracked as
+DRIFT-034, and findings 2–3 are coverage observations. Recorded by the reviewer
+under section 6 because no implementer was present in the session; no
+implementer-authored section of this file was modified, including the acceptance
+rows this round disputes.
 
 ## Decision history
 
@@ -344,3 +477,4 @@ No independent review rounds yet.
 | 2026-07-26 | User | `Investigating` | `Fix planned` | Approved the bounded per-workspace lock, operation-level rebase, source-change defense, typed outcomes, and production-linked concurrency tests. |
 | 2026-07-26 | Codex | `Fix planned` | `Fixing` | Began the isolated production transaction, caller routing, and regression implementation. |
 | 2026-07-26 | Codex | `Fixing` | `Awaiting review` | Implemented the approved transaction, routed all membership mutations through it, passed the focused and full native Windows suites, and completed the independent-review handoff. |
+| 2026-07-26 | Claude | `Awaiting review` | `Verified` | Independent review approved with residual risk: full eight-stage suite, optimized build, and `/analyze` re-run; six transaction mutants confirm the rebase, conflict check, exclusivity, bounds, and idempotence are all detected, while releasing the lock before publication is not; no defect introduced. A pre-existing unreadable-read data loss found during review was reproduced, confirmed present at `6aea09b`, and split to DRIFT-034 rather than folded in. |
