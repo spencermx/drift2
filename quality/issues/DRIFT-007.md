@@ -2,13 +2,13 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Investigating`
+**Current status:** `Awaiting review`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** Medium
 **Confirmed severity:** Medium
 **Primary locations:** `drift.c:HandleDeleteSession`, session-view input and
 rendering paths; proposed `tests/session_delete_test.c` and `tests/run_tests.bat`
-**Implemented by:** —
+**Implemented by:** Codex
 **Reviewed by:** —
 **Decision owner:** User unless explicitly delegated
 
@@ -149,7 +149,7 @@ bypass filesystem permissions or create an attacker-controlled path.
    future cleanup, but too broad for an isolated bug fix and likely to couple
    unrelated input paths.
 
-## Recommended design — awaiting user approval
+## Approved design
 
 1. Retain the selected session identity for the life of the modal; do not
    reload or retarget it because of resize.
@@ -179,25 +179,73 @@ existing construction inline if the production-linked harness can intercept
 the Win32 boundary cleanly. The behavioral contract matters more than the
 helper shape.
 
-## Proposed acceptance criteria and regression plan
+## Implementation
 
-| Criterion | Required evidence |
-|---|---|
-| Resize followed by `Y` cannot delete behind an erased prompt. | Production-linked test delivers resize then `Y`; it requires a second complete popup paint before the intercepted shell call. The old implementation must fail this test because it paints only once. |
-| Current geometry governs the repainted popup. | Test changes the reported window origin/dimensions and requires the second `WriteConsoleOutputW` rectangle to be recentered and bounded by them. |
-| A too-small resized window cancels. | Test shrinks below the minimum, then supplies `Y`; no shell call is allowed. |
-| Query, allocation, and failed or clipped paint paths fail closed. | Deterministic stubs make geometry/output fail or report a partial rectangle; no shell call is allowed. Exercise allocation failure if the harness can inject it without distorting production code. |
-| Ordinary confirmation still works. | With no resize, `Y` reaches the intercepted shell function exactly once while a complete prompt is visible. |
-| Existing cancellation still works. | `N` and Escape each return without a shell call; unrelated keys do not silently cancel or delete. |
-| The target remains the originally selected session. | Test records the `pFrom` path after resize and requires the originally displayed fake transcript path. |
-| DRIFT-003 cleanup remains compatible. | Keep the existing successful-delete/failed-metadata-cleanup contract intact and rerun the session-name coverage. Any material rewrite of its governed control flow must repeat `Audit-ID: DRIFT-003` and receive compatibility review. |
-| The complete application remains healthy. | The production-linked test runs under AddressSanitizer and `/W4 /WX`; all existing stages, an optimized build, `git diff --check`, and relevant static analysis pass. |
-| Tests never touch real user data. | All paths are fake or under a unique `%TEMP%` fixture, shell deletion is always intercepted, and a post-run artifact check is clean. |
+- `HandleDeleteSession` now owns a `repaint` state for the lifetime of its
+  nested modal loop. Every repaint re-queries the visible window, reconstructs
+  the popup at its current clamped width, and recenters it against the current
+  window origin and dimensions.
+- A resize record redraws the underlying session screen, sets `repaint`, and is
+  consumed before another key can be evaluated. The next `Y` is therefore
+  reachable only after a current-geometry popup has been painted.
+- Geometry-query, allocation, write, clipped-output, and too-small-window paths
+  return without entering the destructive branch. The handler compares the
+  rectangle returned by `WriteConsoleOutputW` with the complete requested
+  rectangle, rather than treating a clipped successful call as confirmation.
+- The existing selected-session pointer, `Y`/`N`/Escape and unrelated-key
+  policy, shell flags, reload/selection clamp, and DRIFT-003 saved-name cleanup
+  block remain unchanged.
+- `tests/session_delete_test.c` includes the production translation unit and
+  intercepts console geometry, popup/screen output, modal input, input flush,
+  popup allocation, and `SHFileOperation`. Scripted resize events model the
+  console reflow erasing the prior overlay. The shell boundary always returns
+  from the test interceptor, so no real deletion is reachable.
+- `tests/run_tests.bat` adds the focused AddressSanitizer `/W4 /WX` suite as
+  stage 7 and expands the complete Windows suite from nine to ten stages. Its
+  build output is retained in `%TEMP%\drift_tests` and printed only if that
+  focused test fails to compile.
 
-The expected permanent location is `tests/session_delete_test.c`, added as one
-new stage in `tests/run_tests.bat`. It should include the production translation
-unit, as the existing focused suites do, so modal control-flow regressions are
-tested through the real handler rather than through a duplicate implementation.
+## Acceptance criteria and implementer evidence
+
+| Criterion | Result | Evidence |
+|---|---|---|
+| Resize followed by `Y` cannot delete behind an erased prompt. | Pass | The production handler receives resize then `Y`; the harness requires one underlying-screen redraw, two complete popup paints, and `SHFileOperation` only while the second prompt is marked visible. The pre-fix handler paints once and the investigation probe reached the intercepted delete boundary while hidden. |
+| Current geometry governs the repainted popup. | Pass | The scripted window changes from origin `(2,3)`, size `80x25` to origin `(7,4)`, size `100x30`; the second reported popup rectangle must equal `(35,15)-(78,21)`. |
+| A too-small resized window cancels. | Pass | Resize to `19x6` leaves only the original paint and no shell call, even with `Y` queued behind the resize. |
+| Query, allocation, and failed or clipped paint paths fail closed. | Pass | Separate cases fail the initial geometry query, popup allocation, initial write, resize repaint, and full-width output rectangle. Every case requires zero shell calls. |
+| Ordinary confirmation still works. | Pass | With no resize, one complete popup followed by `Y` reaches the intercepted shell function exactly once while visible and flushes queued input. |
+| Existing cancellation still works. | Pass | `N` and Escape each return with no shell call. An unrelated `J` leaves the visible prompt and original target intact before a later `Y`. Console input failure also cancels. |
+| The target remains the originally selected session. | Pass | After resize and repaint, the intercepted double-NUL shell source begins with exactly `C:\fake\original-session.jsonl`. |
+| DRIFT-003 cleanup remains compatible. | Pass | All 13 unchanged name-metadata cases pass. A new handler integration case reports the partial result when an intercepted successful recycle is followed by isolated metadata-cleanup failure; session reload still occurs. The implementation commit repeats `Audit-ID: DRIFT-003`. |
+| The complete application remains healthy. | Pass | The ten-stage suite, optimized `/O2` build, `git diff --check`, quality validator, and `/analyze` complete successfully. Static analysis reports only three established diagnostics in unchanged code. |
+| Tests never touch real user data. | Pass | `DRIFT_HOME` and `DRIFT_CLAUDE_DIR` point to one unique nonexistent `%TEMP%` root, every transcript path is fake, the real shell function is macro-inaccessible, and the root remains absent after all cases. |
+
+## Validation performed
+
+- Pre-fix production-linked AddressSanitizer probe recorded at investigation
+  commit `ba5647f` — a resize was consumed without another popup paint and a
+  later `Y` reached the intercepted shell boundary while the prompt was hidden.
+  The probe performed no filesystem operation and all disposable artifacts
+  were removed.
+- `cmd /d /c tests\run_tests.bat` — `ALL CHECKS PASSED`, ten stages. The new
+  production-linked session-delete suite passes 16/16 cases under
+  AddressSanitizer and `/W4 /WX`; unchanged coverage includes 13/13 DRIFT-003
+  name-metadata cases, 19/19 settings cases, 12/12 membership-path cases,
+  13/13 membership-concurrency cases, 17/17 Claude launcher cases, 13/13 Vim
+  resolver cases, general regression coverage, source lint, and warning-clean
+  production compilation.
+- `cmd /d /c build.bat` — optimized `/O2` application build succeeded. The
+  ignored `drift.exe` produced by validation was removed afterward.
+- `cl /analyze /W4 /wd4459 /c drift.c` — exit 0. It reports only the three
+  established diagnostics in unchanged code: the `HandleOldHistory` stack
+  frame and parameter/global shadowing in `GetSelectedRowPath` and
+  `GetFilePath`; no diagnostic points into `HandleDeleteSession`.
+- `git diff --check` — passed apart from informational LF-to-CRLF working-tree
+  notices.
+- `powershell -NoProfile -ExecutionPolicy Bypass -File quality\validate.ps1`
+  — passed with DRIFT-007 as the sole active item.
+- Post-run artifact check — the fake session/config root was never created;
+  the generated application and static-analysis object were removed.
 
 ## Compatibility, security, and error paths
 
@@ -242,30 +290,35 @@ or cancel.
 
 ## User disposition
 
-Pending. No production change or permanent regression test is authorized by
-this investigation. The recommended disposition is to retain Medium severity
-and approve the local repaint/recenter/fail-closed design with the regression
-contract above.
+On 2026-07-26, the user retained Medium severity and approved the local
+repaint/recenter/fail-closed design, its production-linked regression contract,
+and DRIFT-003 compatibility validation, and authorized implementation.
 
 ## Independent review handoff
 
-After implementation, the eligible reviewer must not be the implementation
-identity. Read this file and `quality/README.md`, locate the complete immutable
-commit set with:
+The eligible reviewer must not be Codex. Read this file and
+`quality/README.md`, then locate the complete immutable commit set with:
 
 ```text
 git log --all --reverse --format="%H %s" --grep="Audit-ID: DRIFT-007"
 ```
 
-Inspect the handler and the production-linked regression rather than accepting
-the implementer's evidence. Confirm that resize cannot leave an invisible
-armed `Y`, current geometry is used, incomplete paints and too-small windows
-cancel, no real deletion is possible in tests, and normal `Y`/`N`/Escape
-behavior is preserved. If the implementation commit also carries
-`Audit-ID: DRIFT-003`, explicitly review that saved-name cleanup and its
-partial-failure reporting are unchanged. Run the complete suite and report
-`Approved`, `Approved with residual risk`, or `Changes requested` using the
-required quality workflow format.
+Inspect both the investigation and implementation commits plus the surrounding
+modal and DRIFT-003 cleanup control flow. Do not accept `popup_writes == 2` as
+sufficient by itself: verify event ordering, complete returned-region checks,
+current origin/dimension math, cancellation before key dispatch on every
+failure, stable target lifetime, and that a second resize cannot re-arm a stale
+paint. Confirm the harness cannot reach the real shell function or user paths
+and that its visibility model makes the pre-fix implementation fail.
+
+The implementation commit also carries `Audit-ID: DRIFT-003`. Explicitly
+re-confirm that successful deletion still attempts saved-name removal, cleanup
+failure cannot undo or misreport the transcript result, input is flushed, the
+session list reloads and clamps as before, and the existing 13-case metadata
+suite remains meaningful. Run the ten-stage suite, inspect all ten acceptance
+rows rather than treating green output as approval, and report `Approved`,
+`Approved with residual risk`, or `Changes requested` using the required
+quality workflow format.
 
 ## Decision history
 
@@ -274,3 +327,6 @@ required quality workflow format.
 | 2026-07-25 | Codex | — | `Untriaged` | Recorded by the comprehensive application review as a possible invisible armed-delete state after terminal resize. |
 | 2026-07-26 | Codex | `Untriaged` | `Investigating` | Began modal input/render tracing and a disposable session-delete resize reproduction; no production fix authorized. |
 | 2026-07-26 | Codex | `Investigating` | `Investigating` | Confirmed that resize is consumed without repaint or cancellation and a later `Y` reaches the intercepted shell delete boundary while the popup is hidden; retained Medium severity and recommended current-geometry repaint with fail-closed cancellation; awaiting user disposition. |
+| 2026-07-26 | User | `Investigating` | `Fix planned` | Approved current-geometry repaint/recenter, cancellation when the prompt cannot be shown completely, production-linked regression coverage, and DRIFT-003 compatibility validation. |
+| 2026-07-26 | Codex | `Fix planned` | `Fixing` | Began the isolated session-delete modal repair and focused regression implementation. |
+| 2026-07-26 | Codex | `Fixing` | `Awaiting review` | Repainted and recentered the session-delete prompt after resize, failed closed on incomplete visibility, preserved DRIFT-003 cleanup behavior, and added 16 production-linked modal cases; all ten validation stages pass. |
