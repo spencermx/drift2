@@ -515,3 +515,26 @@ file was modified.
 | 2026-07-26 | Codex | `Fix planned` | `Fixing` | Began the isolated resolver, comparison/removal/navigation wiring, and regression implementation. |
 | 2026-07-26 | Codex | `Fixing` | `Awaiting review` | Implemented anchor-aware operational identity with raw-spelling preservation, all-equivalent removal, safe manifest navigation, typed fail-closed behavior, and 12 production-linked regression cases; all nine validation stages pass. |
 | 2026-07-26 | Claude | `Awaiting review` | `Verified` | Independent review approved with residual risk: nine-stage suite, optimized build, and `/analyze` re-run; a 2,652-check property harness confirmed resolution never consults the process CWD and is idempotent; six mutants including the original defect are all detected while DRIFT-005 coverage stays green; DRIFT-004 and DRIFT-005 compatibility confirmed under rule 6 despite the missing repeated audit trailers; quick-add/edit-mode anchor divergence split to DRIFT-035. |
+| 2026-07-26 | Codex | `Verified` | `Verified` | Added the prescribed DRIFT-004/005/006 audit bridge and linked the later DRIFT-035 Not-a-bug disposition without modifying Claude's review; DRIFT-006 verdict unchanged. |
+
+## Record maintenance
+
+**2026-07-26 — Codex; shared-code audit bridge.** Immutable implementation
+commit `0c1372c` carries only `Audit-ID: DRIFT-006`, although it added
+post-parse validation in DRIFT-004's `LoadMembersFrom` surface and changed
+DRIFT-005's `FindMember`/`ApplyMemberChange` decision path. Claude independently
+confirmed both contracts during this item's Round 1 in `38cc6db`. That review
+commit already carries DRIFT-005 and DRIFT-006; the bridge commit adding this
+note repeats `Audit-ID: DRIFT-004`, `Audit-ID: DRIFT-005`, and
+`Audit-ID: DRIFT-006`, explicitly naming both immutable commits so every
+affected audit search discovers the implementation and compatibility review.
+No reviewed commit is amended and no code, test, verdict, or attribution
+changes.
+
+Read Round 1 finding 2 together with [DRIFT-035](DRIFT-035.md) and its later
+investigation commit `a87b54d`. The reviewer-authored finding remains preserved
+verbatim, but its claimed `Shift+W` trigger was disproved: `HandleQuickAdd`
+returns immediately when `edit_armed` is true, and that guard predates both the
+audit and `0c1372c`. DRIFT-035 is therefore `Not a bug as reported`. This
+records correction does not affect Claude's resolver findings, twelve passing
+acceptance criteria, or approval of DRIFT-006.

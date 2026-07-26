@@ -546,3 +546,22 @@ implementer-authored section of this file was modified.
 | 2026-07-25 | Codex | `Fix planned` | `Fixing` | Began the isolated parser, load/save integration, and regression implementation. |
 | 2026-07-25 | Codex | `Fixing` | `Awaiting review` | Replaced all target searches with the shared bounded structural locator, added exact production-linked and portable regression coverage, and passed full, optimized, warning, static-analysis, and quality validation. |
 | 2026-07-25 | Claude | `Awaiting review` | `Verified` | Independent review approved with residual risk: full suite, optimized build, and `/analyze` re-run; a 400,000-case AddressSanitizer property fuzz found no round-trip violation and confirmed the depth cap; eight parser mutants including the exact pre-fix targeting rule are all detected; no code defects; the NUL/trailing-byte coupling, the empty-file behavior change, pre-existing escape round-tripping, and the Unix-runner and save-side coverage gaps recorded as reviewer-discovered residual risk. |
+| 2026-07-26 | Codex | `Verified` | `Verified` | Added a documentation-only bridge to the later DRIFT-006 membership-resolution change after Claude independently confirmed that DRIFT-004's structural target, preservation, and refusal contracts remain compatible. |
+
+## Record maintenance
+
+**2026-07-26 — Codex; documentation only.** Immutable commit `0c1372c` "Fix
+DRIFT-006: anchor relative workspace members" added post-parse member-path
+validation inside `LoadMembersFrom`, which is also part of this item's
+production surface, but carried only `Audit-ID: DRIFT-006`. Claude's DRIFT-006
+Round 1 at review commit `38cc6db` explicitly inspected the coupling: the
+structural locator and byte-preserving splice are unchanged, all 19 production
+settings cases plus 19 shared-locator and six member-refusal cases pass, and
+this item remains `Verified`.
+
+The bridge commit adding this note repeats `Audit-ID: DRIFT-004`,
+`Audit-ID: DRIFT-005`, and `Audit-ID: DRIFT-006`, and names both immutable
+commits. A standard DRIFT-004 audit-ID search is therefore led to the later
+shared-code change and its eligible compatibility review without amending
+either commit. No production code, regression test, status, verdict,
+implementer attribution, or reviewer-authored section changes.
