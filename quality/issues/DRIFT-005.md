@@ -2,14 +2,15 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Investigating`
+**Current status:** `Awaiting review`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** Medium
 **Final severity:** Medium
-**Primary locations:** `drift.c:LoadMembersFrom`, `drift.c:SaveMembersTo`,
-`drift.c:RemoveMemberAt`, `drift.c:ToggleMemberUnderCursor`,
-`drift.c:HandleQuickAdd`
-**Implemented by:** —
+**Primary locations:** `drift.c:AcquireMemberLock`,
+`drift.c:ApplyMemberChange`, `drift.c:LoadMembersFrom`,
+`drift.c:SaveMembersTo`, the three membership UI callers, and
+`tests/membership_concurrency_test.c`
+**Implemented by:** Codex
 **Reviewed by:** —
 **Decision owner:** User unless explicitly delegated
 
@@ -148,7 +149,7 @@ would overstate the impact.
    A second canonical store would require synchronization back into the same
    file and would not remove the race. Rejected.
 
-## Recommended design for user decision
+## Approved design
 
 Introduce one operation API, conceptually
 `ApplyMemberChange(anchor, path, ADD|REMOVE)`, and make it the only production
@@ -191,34 +192,87 @@ make a non-cooperating program honor Drift's separate lock, so the record must
 not claim an absolute guarantee against an external atomic replacement in the
 last read-to-rename window.
 
-## Proposed acceptance criteria
+## Implementation
 
-| Criterion | Required evidence |
-|---|---|
-| Two Drift writers adding different folders preserve both additions and the original list. | Production-linked deterministic interleaving plus a real cross-process lock test. |
-| A concurrent removal cannot be resurrected by an unrelated stale add. | Start from two paths, remove one in writer B, add another in writer A, and require the final union-minus-removal. |
-| A concurrent addition cannot be erased by a stale removal. | Mirror the previous case with exact final membership assertions. |
-| Every mutation rebases on a load performed after lock acquisition. | Test with deliberately stale display globals and a newer on-disk array; the operation must use the latter. |
-| Same-path concurrent operations have defined idempotent results. | Add-present and remove-absent cases return no-change without rewriting unrelated membership. |
-| Lock contention is bounded and visible. | Hold the real lock from another process, require a timed failure/no file change, then release and require a later operation to succeed. |
-| Process exit cannot leave a permanent logical lock. | A child exits while holding the lock; the parent subsequently acquires the same persistent lock file. |
-| The lock spans load through publication and every caller uses it. | Production-linked instrumentation or source guards cover all three call sites and the final rename. |
-| Concurrent updated Drift writers cannot share the temp transaction. | A controlled cross-process test proves serialization around temp creation and publication. |
-| DRIFT-004 target and preservation guarantees remain intact. | All 19 production settings cases and 19 shared locator cases remain green; plugin, nested, duplicate, malformed, NUL, and depth fixtures are unchanged. |
-| Failures never claim success or leave the pane on an invented state. | Busy, blocked, full, read, write, close, and move failures preserve the file, clean temps where possible, resync the pane, and show feedback. |
-| Regression coverage detects the original bug. | Run the confirmed stale-add and resurrected-removal interleavings against a pre-fix or targeted mutant and require failure. |
+- `LoadMembersFrom` now records the exact raw target-array bytes, or the fact
+  that the target is absent, from the same bounded structural parse that fills
+  the visible member list. The dynamic source buffer is replaced on every load
+  and freed during application cleanup.
+- `SaveMembersTo` compares its fresh parse with that recorded membership source
+  before constructing a splice. A changed, newly created, or removed target
+  array is refused with a typed conflict path, while changes to unrelated JSON
+  remain allowed and are preserved from the fresh read.
+- `AcquireMemberLock` opens `.claude\.drift-members.lock` with
+  `GENERIC_READ | GENERIC_WRITE`, no sharing, and `OPEN_ALWAYS`. It retries only
+  sharing violations for at most 1.5 seconds, using wrap-safe
+  `GetTickCount64`; all other errors fail immediately. The persistent file is
+  marked hidden/not-indexed when first created and is never deleted by Drift.
+- `ApplyMemberChange` owns the complete transaction. It acquires the lock,
+  reloads, re-evaluates an exact add or removal against the latest list, calls
+  the checked structural save while still locked, captures a typed outcome,
+  resyncs on failure, and closes the lock handle on every path.
+- Same-state operations return `MEMBER_CHANGE_NO_CHANGE`; full, unsafe, busy,
+  source-conflict, and ordinary I/O outcomes remain distinguishable. Edit-mode
+  callers display specific blocking notifications, and quick-add retains its
+  contextual success/refusal banner.
+- `RemoveMemberAt`, `ToggleMemberUnderCursor`, and `HandleQuickAdd` are the only
+  production mutation call sites, and all now call `ApplyMemberChange`. No
+  production mutation caller bypasses that operation API to call
+  `SaveMembersTo` directly.
+- `README.md:Where things live` documents the lock artifact and handle-owned
+  lifetime. `tests/settings_json_test.c` now establishes the absent-file source
+  through the real loader before testing first publication.
+- `tests/membership_concurrency_test.c` includes production `drift.c` and uses a
+  unique `%TEMP%` workspace. Its child modes exercise the actual executable's
+  lock across processes; no user's workspace or Claude configuration is read.
+- `tests/run_tests.bat` adds the new AddressSanitizer suite as stage 4 and runs
+  the complete Windows validation in eight stages.
 
-## Proposed validation
+## Acceptance criteria and implementer evidence
 
-- Extend the production-linked settings suite rather than testing a copied
-  implementation. A child-process mode can hold or contend for the real lock
-  without touching the user's settings.
-- Use unique `%TEMP%` workspaces and exact final membership/file assertions.
-- Run the complete Windows regression suite, optimized build, `/W4 /WX`
-  production compile, `/analyze`, and `git diff --check`.
-- An optional manual check may open the same disposable workspace in two Drift
-  processes, add different folders, and remove one while the other remains in
-  edit mode. Never use a real workspace for failure-path testing.
+| Criterion | Result | Evidence |
+|---|---|---|
+| Two Drift writers adding different folders preserve both additions and the original list. | Pass | Two real child processes begin behind a parent-held production lock; after release both return `MEMBER_CHANGE_SAVED`, and the final production load contains `base`, `child-one`, and `child-two`. |
+| A concurrent removal cannot be resurrected by an unrelated stale add. | Pass | A deliberately stale snapshot contains `victim`, the external fixture removes it, and `ApplyMemberChange(ADD)` preserves that removal while adding the unrelated path. |
+| A concurrent addition cannot be erased by a stale removal. | Pass | A stale removal rebases over an external `B-added`; the final list removes only `victim` and retains `base` plus `B-added`. |
+| Every mutation rebases on a load performed after lock acquisition. | Pass | All three deterministic stale-display cases modify the file after the visible load and require exact merged membership from the operation API; the cross-process test requires both children to succeed rather than conflict. |
+| Same-path concurrent operations have defined idempotent results. | Pass | Add-present and remove-absent both return `MEMBER_CHANGE_NO_CHANGE` and leave the compact fixture byte-for-byte unchanged. |
+| Lock contention is bounded and visible. | Pass | A child times out with `MEMBER_CHANGE_BUSY` while the parent owns the real lock, leaves settings and temp unchanged, then a post-release operation succeeds. Production callers map busy to explicit feedback. |
+| Process exit cannot leave a permanent logical lock. | Pass | A child signals after acquiring the production lock, is forcibly terminated, and the parent immediately acquires the same persistent lock file. |
+| The lock spans load through publication and every caller uses it. | Pass | Production source has only the declaration, definition, and one transaction-internal `SaveMembersTo` reference; guards require the exact counts for `SaveMembersTo`, `ApplyMemberChange`, and `AcquireMemberLock`, plus lock close and stable path. |
+| Concurrent updated Drift writers cannot share the temp transaction. | Pass | The real child-process union test and parent-held contention test prove that only the lock owner reaches save/temp publication. |
+| DRIFT-004 target and preservation guarantees remain intact. | Pass | All 19 production settings cases, 19 shared locator cases, six member-refusal cases, and exact plugin/nested/malformed/NUL/depth fixtures pass unchanged. |
+| Failures never claim success or leave the pane on an invented state. | Pass | Full-list, structurally unsafe, lock-open failure, lock-busy, and target-conflict cases return typed non-success, preserve exact settings, leave no temp, and resync through production load. The pre-existing checked write/close/move branches are unchanged and were inspected; this item does not claim new fault-injection coverage for those branches. |
+| Regression coverage detects the original bug. | Pass | The pre-fix production probe at `d12f71a` loses an add and resurrects a removal. The permanent stale-state cases require the opposite outcomes, and the pre-fix source lacks the required transaction API/wiring. |
+
+## Validation performed
+
+- Disposable pre-fix production probe at `d12f71a` — both saves returned true,
+  one addition was lost, and one removal was resurrected; exit 0; all artifacts
+  removed.
+- `cmd /d /c tests\run_tests.bat` — `ALL CHECKS PASSED`, eight stages:
+  source lint, general AddressSanitizer regressions, 19/19 DRIFT-004 production
+  settings cases, 13/13 DRIFT-005 production/cross-process cases, 13/13 name
+  metadata cases, 17/17 Claude launcher cases, 13/13 Vim resolver cases, and
+  `/W4 /WX` production compilation. The general suite also includes the 19
+  shared locator and six member-refusal cases.
+- `cmd /d /c build.bat` — optimized `/O2` build succeeded; the ignored
+  executable was removed afterward.
+- `cl /analyze /W4 /wd4459 /c drift.c` — exit 0. The first run identified the
+  new lock timeout's `GetTickCount` wrap warning; the implementation changed to
+  `GetTickCount64`. The final run reports only the three established diagnostics
+  in unchanged code: the `HandleOldHistory` stack frame and parameter/global
+  shadowing in `GetSelectedRowPath` and `GetFilePath`.
+- `bash tests/run_tests.sh` — unavailable on this Windows host because `cc` is
+  not installed in the Bash environment; it stopped at stage 1 before compiling.
+  The changed transaction and concurrency coverage is Windows-specific and is
+  exercised by the complete native Windows suite above.
+- `git diff --check` — passed.
+
+Safe optional manual validation may open the same disposable workspace in two
+Drift processes, add different folders, and remove one while the other remains
+in edit mode. Never use a real workspace for failure-path testing; the automated
+child-process suite already exercises deterministic contention and crash paths.
 
 ## Compatibility, security, and error paths
 
@@ -226,8 +280,8 @@ last read-to-rename window.
   of all unrelated JSON bytes are required compatibility contracts.
 - DRIFT-006 relative-path semantics are unchanged and remain separately tracked.
 - A persistent `.drift-members.lock` is a new app-owned coordination artifact;
-  Claude should ignore it, but the README should document its purpose and that
-  users must not delete it while Drift is running.
+  Claude should ignore it, and the README documents its purpose and handle-owned
+  lifetime.
 - A bounded wait keeps another stuck or slow process from freezing the UI. A
   timeout must leave settings unchanged and produce explicit feedback.
 - An exclusive lock file is not a security boundary. Another process with the
@@ -253,8 +307,32 @@ last read-to-rename window.
 
 ## User disposition
 
-Pending. No production or regression-test change is authorized until the user
-accepts, modifies, defers, or rejects the recommended transaction design.
+On 2026-07-26, the user approved the recommended bounded per-workspace lock,
+operation-level rebase, fresh-source conflict check, typed outcomes, and
+production-linked concurrency coverage, and authorized implementation.
+
+## Independent review handoff
+
+The eligible reviewer must not be Codex. Read this file and
+`quality/README.md`, then locate every immutable commit with:
+
+```text
+git log --all --reverse --format="%H %s" --grep="Audit-ID: DRIFT-005"
+```
+
+Inspect the investigation and implementation commits plus surrounding settings
+code. Pay particular attention to the lock's path and lifetime, acquisition
+before the transaction load, closure on every exit, operation rebase semantics,
+the exact source-array comparison, all three production callers, and
+DRIFT-004 compatibility. Run `cmd /d /c tests\run_tests.bat` and evaluate all
+twelve acceptance rows independently. Confirm that the change does not claim to
+fix DRIFT-006, DRIFT-033, old concurrently running binaries, or arbitrary
+non-cooperating external replacements. Report `Approved`, `Approved with
+residual risk`, or `Changes requested` using the workflow's required format.
+
+## Review history
+
+No independent review rounds yet.
 
 ## Decision history
 
@@ -263,3 +341,6 @@ accepts, modifies, defers, or rejects the recommended transaction design.
 | 2026-07-25 | Codex | — | `Untriaged` | Recorded by the comprehensive application review as a possible successful-I/O lost-update race. |
 | 2026-07-26 | Codex | `Untriaged` | `Investigating` | Began production control-flow tracing and a disposable concurrent-writer reproduction; no production fix authorized. |
 | 2026-07-26 | Codex | `Investigating` | `Investigating` | Confirmed a lost add and a resurrected removal with both production saves reporting success; retained Medium severity and recommended a bounded per-workspace lock plus operation-level rebase; awaiting user disposition. |
+| 2026-07-26 | User | `Investigating` | `Fix planned` | Approved the bounded per-workspace lock, operation-level rebase, source-change defense, typed outcomes, and production-linked concurrency tests. |
+| 2026-07-26 | Codex | `Fix planned` | `Fixing` | Began the isolated production transaction, caller routing, and regression implementation. |
+| 2026-07-26 | Codex | `Fixing` | `Awaiting review` | Implemented the approved transaction, routed all membership mutations through it, passed the focused and full native Windows suites, and completed the independent-review handoff. |

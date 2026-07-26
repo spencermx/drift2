@@ -292,9 +292,9 @@ static void TestEmptyObjectInsertions(void) {
 static void TestAbsentFileCreation(void) {
     DeleteFile(test_tmp);
     DeleteFile(test_settings);
-    json_block_reason = NULL;
+    LoadMembersFrom(test_anchor);
     SetSingleMember("first-member");
-    bool saved = SaveMembersTo(test_anchor);
+    bool saved = json_block_reason == NULL && SaveMembersTo(test_anchor);
     const char* expected =
         "{\n"
         "  \"permissions\": {\n"

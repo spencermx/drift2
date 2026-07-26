@@ -164,6 +164,33 @@ typedef struct {
     char application[MAX_PATH];
     char command[CLAUDE_COMMAND_CAP];
 } ClaudeProcessSpec;
+
+#ifndef DRIFT_MEMBER_LOCK_TIMEOUT_MS
+#define DRIFT_MEMBER_LOCK_TIMEOUT_MS 1500
+#endif
+#ifndef DRIFT_MEMBER_LOCK_RETRY_MS
+#define DRIFT_MEMBER_LOCK_RETRY_MS 25
+#endif
+#define MEMBER_CONFLICT_REASON "(workspace folders changed; retry the edit)"
+
+enum MemberChangeAction {
+    MEMBER_CHANGE_ADD,
+    MEMBER_CHANGE_REMOVE
+};
+enum MemberChangeResult {
+    MEMBER_CHANGE_SAVED,
+    MEMBER_CHANGE_NO_CHANGE,
+    MEMBER_CHANGE_FULL,
+    MEMBER_CHANGE_SETTINGS_BLOCKED,
+    MEMBER_CHANGE_BUSY,
+    MEMBER_CHANGE_CONFLICT,
+    MEMBER_CHANGE_IO_FAILED
+};
+enum MemberLockResult {
+    MEMBER_LOCK_ACQUIRED,
+    MEMBER_LOCK_BUSY,
+    MEMBER_LOCK_FAILED
+};
 // =========================== Types and Constants ===========================
 
 // =========================== Function Declarations =========================
@@ -201,6 +228,9 @@ void LoadMembersFrom(const char* anchor);
 size_t AppendFmt(char* buf, size_t n, size_t cap, const char* fmt, ...);
 bool SaveMembersTo(const char* anchor);
 int FindMember(const char* path);
+enum MemberLockResult AcquireMemberLock(const char* anchor, HANDLE* lock);
+enum MemberChangeResult ApplyMemberChange(
+    const char* anchor, const char* path, enum MemberChangeAction action);
 void RemoveMemberAt(int index);
 void ToggleMemberUnderCursor();
 void EnterEditMode();
@@ -344,6 +374,10 @@ bool manifest_focused = false;
 int manifest_selected = 0;
 int manifest_top = 0;
 char json_buf[65536];
+char* member_source_array = NULL;
+size_t member_source_array_length = 0;
+bool member_source_known = false;
+bool member_source_has_array = false;
 // Non-NULL when settings.json holds something that cannot be rewritten without
 // losing information. Edits are refused rather than made lossy, and the string
 // is what the manifest pane shows, so it carries the reason and its own parens
@@ -2158,9 +2192,45 @@ void DrawSessionsPanes(CHAR_INFO* buffer, int width, int height, int divider2, i
 // permissions.additionalDirectories -- the file Claude Code natively reads.
 // Editing splices only that array so any other settings in the file survive.
 
+static void ClearMemberSource(void) {
+    free(member_source_array);
+    member_source_array = NULL;
+    member_source_array_length = 0;
+    member_source_known = false;
+    member_source_has_array = false;
+}
+
+static bool RememberMemberSource(const char* array, size_t length,
+                                 bool has_array) {
+    ClearMemberSource();
+    if (has_array) {
+        member_source_array = (char*)malloc(length);
+        if (member_source_array == NULL) return false;
+        memcpy(member_source_array, array, length);
+        member_source_array_length = length;
+    }
+    member_source_has_array = has_array;
+    member_source_known = true;
+    return true;
+}
+
+static bool MemberSourceMatches(const char* json, bool file_exists,
+                                const DriftSettingsJsonTarget* target) {
+    if (!member_source_known) return true;
+    bool fresh_has_array = file_exists &&
+        target->action == DRIFT_SETTINGS_JSON_REPLACE_ARRAY;
+    if (member_source_has_array != fresh_has_array) return false;
+    if (!fresh_has_array) return true;
+    size_t fresh_length = (size_t)(target->array_end - target->array_start + 1);
+    return fresh_length == member_source_array_length &&
+           memcmp(json + target->array_start, member_source_array,
+                  fresh_length) == 0;
+}
+
 void LoadMembersFrom(const char* anchor) {
     member_count = 0;
     json_block_reason = NULL;
+    ClearMemberSource();
 
     // Under the Wine wrapper, entries are stored host-style ("/Users/...")
     // so the host claude can read them; internally we use the drive form
@@ -2171,7 +2241,14 @@ void LoadMembersFrom(const char* anchor) {
     char file[MAX_PATH];
     if (snprintf(file, MAX_PATH, "%s\\.claude\\settings.json", anchor) >= MAX_PATH) return;
     FILE* f = fopen(file, "rb");
-    if (f == NULL) return;
+    if (f == NULL) {
+        DWORD attr = GetFileAttributes(file);
+        DWORD err = GetLastError();
+        bool absent = attr == INVALID_FILE_ATTRIBUTES &&
+                      (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND);
+        if (absent) RememberMemberSource(NULL, 0, false);
+        return;
+    }
     int len = (int)fread(json_buf, 1, sizeof(json_buf) - 1, f);
     int extra = fgetc(f); // anything left means the file exceeds our buffer
     fclose(f);
@@ -2185,6 +2262,14 @@ void LoadMembersFrom(const char* anchor) {
     DriftSettingsJsonTarget target;
     if (!DriftLocateSettingsJsonTarget(json_buf, (size_t)len, &target)) {
         json_block_reason = "(settings.json structure cannot be edited safely)";
+        return;
+    }
+    bool has_array = target.action == DRIFT_SETTINGS_JSON_REPLACE_ARRAY;
+    size_t source_length = has_array ?
+        (size_t)(target.array_end - target.array_start + 1) : 0;
+    if (!RememberMemberSource(has_array ? json_buf + target.array_start : NULL,
+                              source_length, has_array)) {
+        json_block_reason = "(not enough memory to edit settings.json)";
         return;
     }
     if (target.action != DRIFT_SETTINGS_JSON_REPLACE_ARRAY) return;
@@ -2357,6 +2442,11 @@ bool SaveMembersTo(const char* anchor) {
         free(arr);
         return false;
     }
+    if (!MemberSourceMatches(json_buf, file_exists, &target)) {
+        json_block_reason = MEMBER_CONFLICT_REASON;
+        free(arr);
+        return false;
+    }
 
     char* out = (char*)malloc((size_t)len + cap + 256);
     if (out == NULL) {
@@ -2416,6 +2506,7 @@ bool SaveMembersTo(const char* anchor) {
             }
         }
     }
+    if (saved) RememberMemberSource(arr, strlen(arr), true);
     free(arr);
     free(out);
     return saved;
@@ -2428,21 +2519,141 @@ int FindMember(const char* path) {
     return -1;
 }
 
-void RemoveMemberAt(int index) {
-    for (int j = index; j < member_count - 1; j++) {
-        strcpy(members[j], members[j + 1]);
+enum MemberLockResult AcquireMemberLock(const char* anchor, HANDLE* lock) {
+    *lock = INVALID_HANDLE_VALUE;
+    char dir[MAX_PATH];
+    if (snprintf(dir, sizeof(dir), "%s\\.claude", anchor) >= (int)sizeof(dir)) {
+        return MEMBER_LOCK_FAILED;
     }
-    member_count--;
+    if (!CreateDirectory(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        return MEMBER_LOCK_FAILED;
+    }
+    DWORD attr = GetFileAttributes(dir);
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        return MEMBER_LOCK_FAILED;
+    }
+
+    char path[MAX_PATH];
+    if (snprintf(path, sizeof(path), "%s\\.drift-members.lock", dir) >=
+        (int)sizeof(path)) {
+        return MEMBER_LOCK_FAILED;
+    }
+
+    ULONGLONG started = GetTickCount64();
+    while (true) {
+        HANDLE candidate = CreateFile(
+            path, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+            FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, NULL);
+        if (candidate != INVALID_HANDLE_VALUE) {
+            *lock = candidate;
+            return MEMBER_LOCK_ACQUIRED;
+        }
+        if (GetLastError() != ERROR_SHARING_VIOLATION) {
+            return MEMBER_LOCK_FAILED;
+        }
+        if (GetTickCount64() - started >= DRIFT_MEMBER_LOCK_TIMEOUT_MS) {
+            return MEMBER_LOCK_BUSY;
+        }
+        Sleep(DRIFT_MEMBER_LOCK_RETRY_MS);
+    }
+}
+
+enum MemberChangeResult ApplyMemberChange(
+    const char* anchor, const char* path, enum MemberChangeAction action) {
+    if (anchor == NULL || path == NULL || path[0] == '\0' ||
+        strlen(path) >= MAX_PATH) {
+        return MEMBER_CHANGE_IO_FAILED;
+    }
+
+    HANDLE lock;
+    enum MemberLockResult lock_result = AcquireMemberLock(anchor, &lock);
+    if (lock_result != MEMBER_LOCK_ACQUIRED) {
+        // The destination is stable until another Drift reaches its final
+        // rename, so a best-effort refresh is still better than retaining the
+        // old edit-mode snapshot after a visible refusal.
+        LoadMembersFrom(anchor);
+        return lock_result == MEMBER_LOCK_BUSY ?
+            MEMBER_CHANGE_BUSY : MEMBER_CHANGE_IO_FAILED;
+    }
+
+    enum MemberChangeResult result = MEMBER_CHANGE_IO_FAILED;
+    LoadMembersFrom(anchor);
+    if (json_block_reason != NULL) {
+        result = MEMBER_CHANGE_SETTINGS_BLOCKED;
+        goto done;
+    }
+
+    int index = FindMember(path);
+    if (action == MEMBER_CHANGE_ADD) {
+        if (index >= 0) {
+            result = MEMBER_CHANGE_NO_CHANGE;
+            goto done;
+        }
+        if (member_count >= MAX_MEMBERS) {
+            result = MEMBER_CHANGE_FULL;
+            goto done;
+        }
+        strcpy(members[member_count], path);
+        member_count++;
+    } else {
+        if (index < 0) {
+            result = MEMBER_CHANGE_NO_CHANGE;
+            goto done;
+        }
+        for (int i = index; i < member_count - 1; i++) {
+            strcpy(members[i], members[i + 1]);
+        }
+        member_count--;
+    }
+
+    if (SaveMembersTo(anchor)) {
+        result = MEMBER_CHANGE_SAVED;
+    } else {
+        bool conflict = json_block_reason != NULL &&
+                        strcmp(json_block_reason, MEMBER_CONFLICT_REASON) == 0;
+        bool blocked = json_block_reason != NULL;
+        // Restore the pane to what the destination actually contains. This
+        // also clears a transaction-only source-conflict reason after its
+        // typed result has been captured for the caller.
+        LoadMembersFrom(anchor);
+        result = conflict ? MEMBER_CHANGE_CONFLICT :
+                 blocked ? MEMBER_CHANGE_SETTINGS_BLOCKED :
+                           MEMBER_CHANGE_IO_FAILED;
+    }
+
+done:
+    CloseHandle(lock);
+    return result;
+}
+
+static void NormalizeManifestSelection(void) {
     if (manifest_selected >= member_count && manifest_selected > 0) {
         manifest_selected = member_count - 1;
     }
-    if (!SaveMembersTo(edit_workspace)) {
-        // Keeping the edit would leave the pane listing a workspace that
-        // settings.json does not describe, and invite a second failed write
-        // on top of it. Resync from the file and say the change did not land
-        LoadMembersFrom(edit_workspace);
+}
+
+static void ReportMemberChangeFailure(enum MemberChangeResult result) {
+    if (result == MEMBER_CHANGE_FULL) {
+        NotifyAndWait("that workspace is full -- press a key");
+    } else if (result == MEMBER_CHANGE_SETTINGS_BLOCKED) {
+        NotifyAndWait("settings.json cannot be edited safely -- press a key");
+    } else if (result == MEMBER_CHANGE_BUSY) {
+        NotifyAndWait("settings.json is busy in another Drift -- press a key");
+    } else if (result == MEMBER_CHANGE_CONFLICT) {
+        NotifyAndWait("workspace folders changed during the edit -- try again -- press a key");
+    } else if (result == MEMBER_CHANGE_IO_FAILED) {
         NotifyAndWait("settings.json was not updated -- press a key");
     }
+}
+
+void RemoveMemberAt(int index) {
+    if (index < 0 || index >= member_count) return;
+    char path[MAX_PATH];
+    strcpy(path, members[index]);
+    enum MemberChangeResult result = ApplyMemberChange(
+        edit_workspace, path, MEMBER_CHANGE_REMOVE);
+    NormalizeManifestSelection();
+    ReportMemberChangeFailure(result);
 }
 
 void ToggleMemberUnderCursor() {
@@ -2456,13 +2667,10 @@ void ToggleMemberUnderCursor() {
         RemoveMemberAt(i);
         return;
     }
-    if (member_count >= MAX_MEMBERS) return;
-    strcpy(members[member_count], path);
-    member_count++;
-    if (!SaveMembersTo(edit_workspace)) {
-        LoadMembersFrom(edit_workspace);
-        NotifyAndWait("settings.json was not updated -- press a key");
-    }
+    enum MemberChangeResult result = ApplyMemberChange(
+        edit_workspace, path, MEMBER_CHANGE_ADD);
+    NormalizeManifestSelection();
+    ReportMemberChangeFailure(result);
 }
 
 void EnterEditMode() {
@@ -2634,22 +2842,21 @@ void HandleQuickAdd() {
         if (ch >= '1' && ch < '1' + count) {
             char anchor[MAX_PATH];
             if (snprintf(anchor, MAX_PATH, "%s\\%s", root, names[ch - '1']) < MAX_PATH) {
-                LoadMembersFrom(anchor);
-                // Every one of these three used to fall through to "Added
-                // to X", so a refusal was indistinguishable from a write
+                enum MemberChangeResult result = ApplyMemberChange(
+                    anchor, target, MEMBER_CHANGE_ADD);
                 const char* refused = NULL;
-                if (json_block_reason != NULL) {
-                    refused = "its settings cannot be edited";
-                } else if (FindMember(target) >= 0) {
+                if (result == MEMBER_CHANGE_NO_CHANGE) {
                     refused = "it is already there";
-                } else if (member_count >= MAX_MEMBERS) {
+                } else if (result == MEMBER_CHANGE_FULL) {
                     refused = "that workspace is full";
-                } else {
-                    strcpy(members[member_count], target);
-                    member_count++;
-                    if (!SaveMembersTo(anchor)) {
-                        refused = "settings.json could not be written";
-                    }
+                } else if (result == MEMBER_CHANGE_SETTINGS_BLOCKED) {
+                    refused = "its settings cannot be edited";
+                } else if (result == MEMBER_CHANGE_BUSY) {
+                    refused = "another Drift is editing it";
+                } else if (result == MEMBER_CHANGE_CONFLICT) {
+                    refused = "its folders changed; try again";
+                } else if (result == MEMBER_CHANGE_IO_FAILED) {
+                    refused = "settings.json could not be written";
                 }
                 char msg[160];
                 if (refused == NULL) {
@@ -4238,6 +4445,7 @@ void DrawOldHistoryPopup(int width, int height, DistanceEntry* distances, int di
 }
 
 void Cleanup() {
+    ClearMemberSource();
     const char* temp = getenv("TEMP");
     if (temp != NULL) {
         char temp_path[MAX_PATH];

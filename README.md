@@ -182,6 +182,7 @@ workspace. Names live beside it instead.
 └── workspaces\
     └── 2026-07-25_07-02-00\         a workspace — the folder is an opaque id
         ├── .claude\
+        │   ├── .drift-members.lock  drift's cross-instance membership lock
         │   └── settings.json        its folders, in permissions.additionalDirectories
         └── CLAUDE.md                yours
 ```
@@ -191,6 +192,11 @@ workspace. Names live beside it instead.
 If the JSON or that exact path is malformed, wrongly typed, or ambiguous, drift
 refuses the membership edit and leaves the file alone. Session transcripts stay
 where Claude puts them, in `%USERPROFILE%\.claude\projects`.
+
+Concurrent drift processes serialize folder changes through
+`.drift-members.lock`, then re-read and apply the requested add or removal to
+the latest list. The file remains in place normally; lock ownership is the live
+Windows file handle, which is released when the operation or process ends.
 
 ### Environment variables
 
