@@ -40,8 +40,25 @@ detection, or a different storage/update design for two successful operations.
 - What user feedback is appropriate when a concurrent edit cannot be merged or
   retried safely?
 
+## Cross-linked observations
+
+**2026-07-25 — Claude; reviewer note from [DRIFT-003](DRIFT-003.md) Round 1.**
+DRIFT-003's fix added a second cross-process symptom that belongs to this item's
+scope rather than its own. When `SetNameEntry` confirmed the metadata file was
+absent, it now publishes with `flags = 0` and returns `false` if another process
+created the destination first (`drift.c:1070-1074`). That correctly refuses to
+overwrite the competing file, but it returns without clearing
+`workspace_names_loaded`, so this process keeps serving display names from a
+cache that predates the competing file until some later successful write
+invalidates it. It is not a regression — the pre-fix code did invalidate the
+cache unconditionally, but only because it also overwrote the competing file
+unconditionally. Triage of this item should decide cache invalidation on refused
+publication alongside serialization, since a losing writer generally needs to
+re-read rather than keep its stale snapshot.
+
 ## Decision history
 
 | Date | Actor | From | To | Summary |
 |---|---|---|---|---|
 | 2026-07-25 | Codex | — | `Untriaged` | Reported while separating DRIFT-003's failed-I/O corruption from an independently fixable successful-I/O race. |
+| 2026-07-25 | Claude | `Untriaged` | `Untriaged` | Cross-linked a reviewer observation from DRIFT-003 Round 1: refused publication now leaves the workspace-name cache stale. Status unchanged; no investigation performed. |

@@ -2,14 +2,14 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Awaiting review`
+**Current status:** `Verified`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** Medium
 **Final severity:** Medium
 **Primary locations:** `drift.c:SetNameEntry`, `SetSessionName`,
 `SetWorkspaceName`, rename/create/delete callers; `tests/name_entry_test.c`
 **Implemented by:** Codex
-**Reviewed by:** —
+**Reviewed by:** Claude: approved with residual risk
 **Decision owner:** User unless explicitly delegated
 
 ## Trigger and impact
@@ -278,7 +278,137 @@ and that DRIFT-033 was not silently treated as fixed.
 
 ## Review history
 
-No independent review rounds have been recorded yet.
+### Round 1 — Claude, 2026-07-25
+
+- **Reviewer:** `Claude` (Opus 5). Absent from `Implemented by`, so eligible.
+- **Commit set:** `52db0ae` "Investigate DRIFT-003: confirm lossy name rewrite"
+  (documentation only; also carries `Audit-ID: DRIFT-033`) and `6387846`
+  "Fix DRIFT-003: preserve names on failed rewrites". `git log --all --reverse
+  --format="%H %s" --grep="Audit-ID: DRIFT-003"` returns these two and no
+  others.
+- **Verdict:** `Approved with residual risk`.
+
+**Acceptance criteria:** all eleven pass. Rows 1–6 and 10–11 were re-verified
+directly by the reviewer rather than accepted from the evidence column; rows
+7–9 were confirmed by reading the production callers, since they have no
+automated coverage (see the coverage gap below).
+
+**Tests run by the reviewer:**
+
+- `cmd /c tests\run_tests.bat` — `ALL CHECKS PASSED`, six stages: source lint,
+  general AddressSanitizer regressions, 13/13 name-metadata cases, 17/17 Claude
+  launcher cases, 13/13 Vim resolver cases, and the `/W4 /WX` production
+  compile. DRIFT-001 and DRIFT-002 coverage is unaffected.
+- `build.bat` — optimized `/O2` build succeeded. `drift.exe` was removed
+  afterward; the working tree was clean before and after the review.
+- `cl /analyze /W4 /wd4459 /c drift.c` — exit 0. Three diagnostics, all in code
+  this fix does not touch: C6262 (32,900-byte stack frame) at `drift.c:4149` in
+  `HandleOldHistory`, and C6244 shadowing at `drift.c:4414` and `drift.c:4430`.
+  None intersects `SetNameEntry` or any changed caller. This matches the
+  implementer's claim.
+- **Mutation testing (reviewer-added, run against throwaway copies of `drift.c`
+  outside the repository; the repository was never modified).** The issue record
+  correctly notes the suite cannot be run against the literal pre-fix source,
+  because the pre-fix `void` API does not compile against the new assertions. To
+  test the claim anyway, four targeted mutants were built and run:
+  1. Delete the `GetFileAttributes` absence check so any failed open is again
+     treated as an absent file — this is the original DRIFT-003 defect. Result:
+     "an unreadable existing file is preserved and reported as failure" FAILS.
+  2. Force `flags = MOVEFILE_REPLACE_EXISTING` unconditionally. Result: the two
+     first-file cases FAIL.
+  3. Ignore the `MoveFileEx` return value. Result: the publication-failure and
+     concurrent-creation cases FAIL.
+  4. Evaluate the key match per buffer chunk instead of per logical line.
+     Result: "an over-long matching row is removed through its newline" FAILS.
+  All four mutants exit non-zero, so the suite does discriminate on the actual
+  production behavior and would detect reintroduction.
+
+**Independent verification of specific claims:**
+
+- The over-long-row case is genuinely multi-chunk. The production buffer is
+  `MAX_PATH + SESSION_NAME_LEN + 64` = 260 + 96 + 64 = 420 bytes, so `fgets`
+  reads at most 419 at a time; the 1,208-byte fixture row spans three chunks.
+- Test isolation holds. `GetDriftDir` (`drift.c:GetDriftDir`) reads `DRIFT_HOME`
+  on every call rather than caching it, so the suite's per-run temp root really
+  does divert every name-file path away from the user's real data, and the root
+  is removed at the end.
+- All four production call sites were enumerated with a whole-file search; none
+  was left ignoring the new `bool`. `HandleRenameSession` (`drift.c:1753`)
+  returns before touching `sel->name`; `HandleRenameWorkspace` (`drift.c:1872`)
+  acknowledges failure; `HandleDeleteSession` (`drift.c:1945`) records cleanup
+  failure only inside the successful-`SHFileOperation` branch and reports it
+  after the reload; `HandleCreate` (`drift.c:4021`) short-circuits so a
+  non-custom name never calls the setter and the workspace still exists under
+  its raw id.
+- Failure paths close both streams. The early `break` on a failed `fputs` still
+  falls through to `ferror(in)`/`fclose(in)`, and `fclose(out)` is
+  unconditional, so no handle leaks on any failure route.
+- DRIFT-033 was not silently treated as fixed. No locking, conflict detection,
+  or unique temp naming was added, and its tracker row remains `Untriaged`.
+
+**Findings — no code defects. Three residual/records-level items:**
+
+1. *An embedded NUL byte desynchronizes the new logical-line tracker.*
+   `drift.c:1044-1045` derive `chunk_len` from `strlen(line)` and `ends_line`
+   from `strchr(line, '\n')`. If a row contains a NUL before its newline,
+   `strchr` cannot see the newline, `at_line_start` is left `false`, and the
+   *next* logical row is never tested against `key` — so a matching row placed
+   immediately after a NUL-containing row is retained while the replacement row
+   is also appended, yielding a duplicate. This needs external corruption:
+   both of Drift's write paths (`fputs` of a `fgets` chunk, and the `fprintf`
+   append) emit C strings, so Drift never writes a NUL into these files. The
+   pre-fix code truncated at a NUL through the same `fputs` and could also
+   mis-match a continuation chunk, so this is not a regression, and the outcome
+   is a duplicate row rather than data loss. Judged below the section 1
+   reporting bar, so no new ID was opened; recorded here so it is not lost.
+2. *The create-race path leaves the in-memory name cache stale.* At
+   `drift.c:1070-1074`, when the file was confirmed absent and `MoveFileEx`
+   fails because another process created the destination first, the function
+   correctly returns `false` without publishing — but `workspace_names_loaded`
+   is not cleared, so Drift keeps serving display names from a cache that
+   predates the competing file until something else invalidates it. Refusing to
+   claim success is the right behavior for this item, and the pre-fix
+   unconditional invalidation was paired with unconditionally overwriting the
+   competing file, so this is not a net regression. It belongs to the
+   cross-process class already owned by [DRIFT-033](DRIFT-033.md) and is
+   cross-linked there rather than given a new ID.
+3. *A final row with no trailing newline still concatenates with the appended
+   row.* If the existing file's last line lacks `\n`, the `fprintf` at
+   `drift.c:1060` appends directly onto it. This is pre-existing and unchanged
+   by this fix — Drift always terminates its own rows — so it is out of scope,
+   noted only so a future editor of this function does not assume it was
+   handled.
+
+**Coverage gap:** acceptance rows 7–9 (rename ordering, workspace-create partial
+success, session-delete partial success) have no automated coverage. They are
+console handlers with no test seam, and the reviewer confirmed each by reading
+the production code, but a future refactor of those handlers would not be caught
+by the suite. This is a disclosed limitation, not a defect in the fix.
+
+**Checked and dismissed:** the `GetLastError()` at `drift.c:1025` is read
+immediately after `GetFileAttributes`, so it is that call's error and not stale
+`fopen` state; a `fopen` failure with the file still present (sharing violation,
+`EMFILE`, access denied) correctly yields `absent == false` and aborts; the
+directory-missing case is moot because `GetDriftDir` creates `.drift` before
+`GetNameFile` returns; `DeleteFile(tmp)` can never target the real file because
+`tmp` is `file` plus a `.tmp` suffix; a leftover temp after a refused
+`DeleteFile` self-heals because the next attempt opens it `"wb"`; a key can
+never straddle a chunk boundary because `klen <= MAX_PATH` (260) is always below
+the 419-byte read; and over-invalidating `workspace_names_loaded` on a
+session-names write is pre-existing and harmless.
+
+**Scope check:** clean. `6387846` touches `drift.c` only in `SetNameEntry`, the
+two wrappers, and the four callers; adds `tests/name_entry_test.c`; renumbers
+`tests/run_tests.bat` from five to six stages and inserts the new stage; and
+updates only this issue file and its own tracker row. `52db0ae` is documentation
+only. No unrelated cleanup, formatting, or refactoring.
+
+**Resolution:** approved with residual risk. No finding requires a change to
+this commit set, so the item closes as `Verified` with findings 1–3 and the
+coverage gap preserved above as reviewer-discovered residual risk, separate from
+the implementer's own residual-risk section. Recorded by the reviewer under
+section 6 because no implementer was present in the session; no
+implementer-authored section of this file was modified.
 
 ## Decision history
 
@@ -289,3 +419,4 @@ No independent review rounds have been recorded yet.
 | 2026-07-25 | User | `Investigating` | `Fix planned` | Approved the recommended fail-closed streaming transaction and authorized implementation. |
 | 2026-07-25 | Codex | `Fix planned` | `Fixing` | Began the isolated production change and production-linked regression coverage. |
 | 2026-07-25 | Codex | `Fixing` | `Awaiting review` | Implemented checked streaming publication and caller feedback, added 13 production-linked regression cases, and passed focused, full, optimized, warning, and static-analysis validation. |
+| 2026-07-25 | Claude | `Awaiting review` | `Verified` | Independent review approved with residual risk: full suite, optimized build, and `/analyze` re-run; four targeted mutants confirmed the suite detects reintroduction; no code defects; NUL-byte line-tracking edge, create-race cache staleness, and the caller-side coverage gap recorded as reviewer-discovered residual risk. |
