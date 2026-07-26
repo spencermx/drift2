@@ -172,6 +172,7 @@ typedef struct {
 #define DRIFT_MEMBER_LOCK_RETRY_MS 25
 #endif
 #define MEMBER_CONFLICT_REASON "(workspace folders changed; retry the edit)"
+#define MEMBER_PATH_BLOCK_REASON "(a folder path cannot be resolved safely)"
 
 enum MemberChangeAction {
     MEMBER_CHANGE_ADD,
@@ -227,11 +228,14 @@ void LoadWorkspaceNames();
 void LoadMembersFrom(const char* anchor);
 size_t AppendFmt(char* buf, size_t n, size_t cap, const char* fmt, ...);
 bool SaveMembersTo(const char* anchor);
+bool ResolveMemberPath(const char* anchor, const char* stored,
+                       char out[MAX_PATH]);
 int FindMember(const char* path);
 enum MemberLockResult AcquireMemberLock(const char* anchor, HANDLE* lock);
 enum MemberChangeResult ApplyMemberChange(
     const char* anchor, const char* path, enum MemberChangeAction action);
 void RemoveMemberAt(int index);
+bool JumpToMemberAt(int index);
 void ToggleMemberUnderCursor();
 void EnterEditMode();
 void ExitEditMode();
@@ -369,6 +373,7 @@ bool edit_armed = false;
 char edit_workspace[MAX_PATH];
 char edit_workspace_name[MAX_PATH];
 char members[MAX_MEMBERS][MAX_PATH];
+char member_anchor[MAX_PATH];
 int member_count = 0;
 bool manifest_focused = false;
 int manifest_selected = 0;
@@ -2227,10 +2232,124 @@ static bool MemberSourceMatches(const char* json, bool file_exists,
                   fresh_length) == 0;
 }
 
+static bool IsMemberPathSeparator(char c) {
+    return c == '\\' || c == '/';
+}
+
+static bool HasMemberDrivePrefix(const char* path) {
+    unsigned char drive = path == NULL ? 0 : (unsigned char)path[0];
+    return ((drive >= 'A' && drive <= 'Z') ||
+            (drive >= 'a' && drive <= 'z')) &&
+           path[1] == ':';
+}
+
+static bool IsFullyQualifiedMemberPath(const char* path) {
+    if (path == NULL) return false;
+    if (HasMemberDrivePrefix(path)) return IsMemberPathSeparator(path[2]);
+    if (!IsMemberPathSeparator(path[0]) ||
+        !IsMemberPathSeparator(path[1])) return false;
+
+    // A UNC path needs both a server and a share. GetFullPathName accepts some
+    // incomplete forms, but they do not identify one deterministic folder.
+    const char* server = path + 2;
+    if (*server == '\0' || IsMemberPathSeparator(*server)) return false;
+    const char* separator = server;
+    while (*separator != '\0' && !IsMemberPathSeparator(*separator)) separator++;
+    if (*separator == '\0') return false;
+    const char* share = separator + 1;
+    return *share != '\0' && !IsMemberPathSeparator(*share);
+}
+
+// Resolve a configured additionalDirectories value without consulting the
+// process working directory. Relative values belong to the workspace anchor,
+// because that is the working directory passed to Claude for this workspace.
+// The configured spelling remains in members[]; this form is only for folder
+// identity and navigation.
+bool ResolveMemberPath(const char* anchor, const char* stored,
+                       char out[MAX_PATH]) {
+    if (out == NULL) return false;
+    out[0] = '\0';
+    if (stored == NULL || stored[0] == '\0' || strlen(stored) >= MAX_PATH) {
+        return false;
+    }
+
+    char value[MAX_PATH];
+    strcpy(value, stored);
+    for (char* p = value; *p != '\0'; p++) {
+        if (*p == '/') *p = '\\';
+    }
+
+    char candidate[MAX_PATH * 2 + 2];
+    if (HasMemberDrivePrefix(value) && !IsMemberPathSeparator(value[2])) {
+        // C:folder depends on Windows' hidden per-drive working directory.
+        return false;
+    }
+
+    if (IsFullyQualifiedMemberPath(value)) {
+        if (snprintf(candidate, sizeof(candidate), "%s", value) >=
+            (int)sizeof(candidate)) return false;
+    } else if (IsMemberPathSeparator(value[0])) {
+        // A single leading separator is rooted on a drive. It is deterministic
+        // only when the workspace anchor supplies that drive.
+        if (anchor == NULL || !HasMemberDrivePrefix(anchor) ||
+            !IsMemberPathSeparator(anchor[2])) return false;
+        if (snprintf(candidate, sizeof(candidate), "%c:%s", anchor[0], value) >=
+            (int)sizeof(candidate)) return false;
+    } else {
+        if (anchor == NULL || strlen(anchor) >= MAX_PATH ||
+            !IsFullyQualifiedMemberPath(anchor)) return false;
+        if (snprintf(candidate, sizeof(candidate), "%s\\%s", anchor, value) >=
+            (int)sizeof(candidate)) return false;
+    }
+
+    for (char* p = candidate; *p != '\0'; p++) {
+        if (*p == '/') *p = '\\';
+    }
+    if (!IsFullyQualifiedMemberPath(candidate)) return false;
+
+    DWORD length = GetFullPathNameA(candidate, MAX_PATH, out, NULL);
+    if (length == 0 || length >= MAX_PATH) {
+        out[0] = '\0';
+        return false;
+    }
+
+    // Keep the separator required by drive roots, but make every other
+    // trailing-separator spelling compare the same (including UNC shares).
+    while (length > 0 && IsMemberPathSeparator(out[length - 1])) {
+        bool drive_root = length == 3 && HasMemberDrivePrefix(out) &&
+                          IsMemberPathSeparator(out[2]);
+        bool device_drive_root = length == 7 &&
+            IsMemberPathSeparator(out[0]) && IsMemberPathSeparator(out[1]) &&
+            (out[2] == '?' || out[2] == '.') &&
+            IsMemberPathSeparator(out[3]) && HasMemberDrivePrefix(out + 4) &&
+            IsMemberPathSeparator(out[6]);
+        if (drive_root || device_drive_root) break;
+        out[--length] = '\0';
+    }
+    return out[0] != '\0';
+}
+
+static bool MemberPathsEqual(const char* anchor, const char* left,
+                             const char* right) {
+    if (left == NULL || right == NULL) return false;
+    if (_stricmp(left, right) == 0) return true;
+    char resolved_left[MAX_PATH];
+    char resolved_right[MAX_PATH];
+    return ResolveMemberPath(anchor, left, resolved_left) &&
+           ResolveMemberPath(anchor, right, resolved_right) &&
+           _stricmp(resolved_left, resolved_right) == 0;
+}
+
 void LoadMembersFrom(const char* anchor) {
     member_count = 0;
     json_block_reason = NULL;
     ClearMemberSource();
+    member_anchor[0] = '\0';
+    if (anchor == NULL || snprintf(member_anchor, sizeof(member_anchor), "%s", anchor) >=
+        (int)sizeof(member_anchor)) {
+        json_block_reason = MEMBER_PATH_BLOCK_REASON;
+        return;
+    }
 
     // Under the Wine wrapper, entries are stored host-style ("/Users/...")
     // so the host claude can read them; internally we use the drive form
@@ -2312,6 +2431,9 @@ void LoadMembersFrom(const char* anchor) {
         if (truncated) {
             json_block_reason = "(a folder path is too long to edit)";
         }
+        if (!truncated && n == 0) {
+            json_block_reason = MEMBER_PATH_BLOCK_REASON;
+        }
         if (!truncated && n > 0) {
             if (host && out[0] == '/') {
                 char tmp[MAX_PATH];
@@ -2320,7 +2442,15 @@ void LoadMembersFrom(const char* anchor) {
                         if (*q == '/') *q = '\\';
                     }
                     strcpy(out, tmp);
+                } else {
+                    json_block_reason = MEMBER_PATH_BLOCK_REASON;
                 }
+            }
+            char resolved[MAX_PATH];
+            if (!ResolveMemberPath(member_anchor, out, resolved)) {
+                // Keep the original text available for display, but refuse a
+                // rewrite that could act on a different folder than Claude.
+                json_block_reason = MEMBER_PATH_BLOCK_REASON;
             }
             member_count++;
         }
@@ -2513,8 +2643,14 @@ bool SaveMembersTo(const char* anchor) {
 }
 
 int FindMember(const char* path) {
+    if (path == NULL) return -1;
+    // Prefer the exact configured spelling when duplicate legacy entries are
+    // present; the second pass supplies operational path identity.
     for (int i = 0; i < member_count; i++) {
         if (_stricmp(members[i], path) == 0) return i;
+    }
+    for (int i = 0; i < member_count; i++) {
+        if (MemberPathsEqual(member_anchor, members[i], path)) return i;
     }
     return -1;
 }
@@ -2583,6 +2719,13 @@ enum MemberChangeResult ApplyMemberChange(
         goto done;
     }
 
+    char resolved_path[MAX_PATH];
+    if (!ResolveMemberPath(anchor, path, resolved_path)) {
+        json_block_reason = MEMBER_PATH_BLOCK_REASON;
+        result = MEMBER_CHANGE_SETTINGS_BLOCKED;
+        goto done;
+    }
+
     int index = FindMember(path);
     if (action == MEMBER_CHANGE_ADD) {
         if (index >= 0) {
@@ -2600,10 +2743,15 @@ enum MemberChangeResult ApplyMemberChange(
             result = MEMBER_CHANGE_NO_CHANGE;
             goto done;
         }
-        for (int i = index; i < member_count - 1; i++) {
-            strcpy(members[i], members[i + 1]);
+        // One explicit removal revokes every spelling of the same operational
+        // folder so a hidden relative/absolute duplicate cannot retain access.
+        int write = 0;
+        for (int i = 0; i < member_count; i++) {
+            if (MemberPathsEqual(anchor, members[i], path)) continue;
+            if (write != i) strcpy(members[write], members[i]);
+            write++;
         }
-        member_count--;
+        member_count = write;
     }
 
     if (SaveMembersTo(anchor)) {
@@ -2654,6 +2802,15 @@ void RemoveMemberAt(int index) {
         edit_workspace, path, MEMBER_CHANGE_REMOVE);
     NormalizeManifestSelection();
     ReportMemberChangeFailure(result);
+}
+
+bool JumpToMemberAt(int index) {
+    if (index < 0 || index >= member_count) return false;
+    char jump[MAX_PATH];
+    if (!ResolveMemberPath(edit_workspace, members[index], jump)) return false;
+    ChangeCurrentDirectory(jump);
+    manifest_focused = false;
+    return true;
 }
 
 void ToggleMemberUnderCursor() {
@@ -3148,10 +3305,9 @@ int HandleInput() {
             else if ((vk == 'X' || vk == VK_SPACE) && member_count > 0) RemoveMemberAt(manifest_selected);
             else if (vk == VK_RETURN && member_count > 0) {
                 // Jump the browser to this member for inspection
-                char jump[MAX_PATH];
-                strcpy(jump, members[manifest_selected]);
-                ChangeCurrentDirectory(jump);
-                manifest_focused = false;
+                if (!JumpToMemberAt(manifest_selected)) {
+                    NotifyAndWait("folder path cannot be resolved safely -- press a key");
+                }
             }
             else if (vk == VK_TAB || vk == VK_ESCAPE || vk == 'H') manifest_focused = false;
             else if (vk == 'C' || vk == VK_BACK) ExitEditMode();
