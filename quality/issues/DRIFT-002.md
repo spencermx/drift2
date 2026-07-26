@@ -2,14 +2,14 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Awaiting review`
+**Current status:** `Verified`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** High
 **Final severity:** High
 **Primary locations:** `drift.c:1125-1249` (shared resolver),
 `drift.c:3192-3231` (`OpenFileInEditor`), `tests/vim_resolver_test.c`
 **Implemented by:** Codex
-**Reviewed by:** —
+**Reviewed by:** Claude: approved
 **Decision owner:** User unless explicitly delegated
 
 ## Trigger and impact
@@ -257,9 +257,83 @@ risk`, or `Changes requested` using the workflow's required review format.
 | 2026-07-25 | User | `Investigating` | `Fix planned` | Approved the recommended shared absolute-`PATH` resolver design. |
 | 2026-07-25 | Codex | `Fix planned` | `Fixing` | Began the isolated implementation and regression coverage. |
 | 2026-07-25 | Codex | `Fixing` | `Awaiting review` | Implemented absolute Vim resolution, preserved Claude and fallback behavior, passed focused and full validation, and prepared the independent-review handoff. |
+| 2026-07-25 | Claude | `Awaiting review` | `Verified` | Independent review approved the complete commit set with no code findings; recorded one records-level follow-up against DRIFT-001's audit trail. |
 
 ## Review history
 
-No independent review has been recorded. The next eligible reviewer must not
-be listed in `Implemented by` and must add a chronological review round under
-the protocol in `quality/README.md`.
+### Round 1 — Claude, 2026-07-25
+
+- **Reviewer:** `Claude` (Opus 5). Absent from `Implemented by`, so eligible.
+- **Commit set:** `8501bfb` "Investigate DRIFT-002: confirm Vim search hijack"
+  (documentation only) and `e1070d2` "Fix DRIFT-002: resolve Vim only from
+  absolute PATH entries". Both carry the `Audit-ID: DRIFT-002` trailer; no
+  others exist.
+- **Verdict:** `Approved`.
+
+**Acceptance criteria:** all ten pass, each confirmed independently rather than
+accepted from the implementer evidence column. The tenth was re-run directly.
+
+**Tests run by the reviewer:**
+
+- `cmd /c tests\run_tests.bat` — ALL CHECKS PASSED, five stages: source lint,
+  general AddressSanitizer regressions, 17/17 Claude launcher cases, 13/13 Vim
+  resolver and wiring cases, and the `/W4 /WX` production compile.
+- `.\build.bat` — optimized `drift.exe` built successfully. The working tree
+  remained clean afterward; `drift.exe` is untracked.
+- Negative control on the new source guards: applied all five to
+  `git show a9e75bd:drift.c`. Three fail against the pre-fix source —
+  `SearchPath(` present, `SetSearchPathMode(` present, `ResolveVim(vim_exe)`
+  absent — so the suite does detect a reversion, as the implementer claimed.
+  `CreateProcess(vim_exe, command` and the `ShellExecute` fallback were already
+  present before the fix, so those two guards do not discriminate on their own.
+
+**Claude compatibility**, which the agreed design required the reviewer to
+inspect explicitly, was verified three ways: `tests/claude_launcher_test.c` is
+untouched by `e1070d2`; all 17 cases pass unchanged; and tracing the refactor
+shows the tokenizer body is identical, `.exe`-before-`.cmd` ordering is preserved
+through the `names[]` index-0/1 to `EXE`/`CMD` mapping, and the wrappers restore
+the exact pre-refactor initialization of `out->path` and `out->kind`. DRIFT-001
+therefore remains correctly `Verified`.
+
+**Findings — no code defects. Three records-level items:**
+
+1. *DRIFT-001's audit trail no longer reaches the commit that rewrote its code.*
+   `e1070d2` restructured all three DRIFT-001 resolver functions but carries only
+   `Audit-ID: DRIFT-002`. `git log --grep="Audit-ID: DRIFT-001"` returns only
+   `a9e75bd` and `2be62cf`, while `git log -L 1163,1200:drift.c` shows `e1070d2`
+   as the last commit to touch those lines, so a reviewer following section 5.4
+   would miss the refactor. This file discloses the coupling; DRIFT-001.md did
+   not. Rule 9 forbids amending `e1070d2`, so the remedy is a note in DRIFT-001's
+   record, added to that file's Round 1 by this reviewer.
+2. *The source-text guards are effective but brittle.* They match text, not
+   semantics: a harmless rename of `vim_exe` would fail them, and they do not
+   verify the guarded call is reachable or in the correct branch. The criterion
+   that the displayed directory remains the child working directory is verified
+   by inspection of `drift.c:3225` only — the guard stops at
+   `CreateProcess(vim_exe, command`.
+3. *Trailer vocabulary is drifting.* `8501bfb` uses `Investigated-by:`, which
+   `README.md` does not define. It is sensible and correctly avoids claiming
+   `Implemented-by` for a documentation-only commit, but the protocol defines
+   only `Audit-ID`, `Implemented-by`, and `Reviewed-by`; the set should be pinned
+   before it fragments.
+
+**Checked and dismissed:** removing `SetSearchPathMode` is inert, because that
+flag governs `SearchPath` and no `SearchPath` call remains; both surviving
+`CreateProcess` calls pass non-null absolute application names; Vim's own
+bare-command lookups from the displayed directory are the DRIFT-031 class but are
+Vim's behavior under an explicitly set working directory, identical to running it
+there from a shell; and the Vim path has no DRIFT-032-style silent failure
+because the `ShellExecute` fallback is visible behavior.
+
+**Scope check:** clean. `e1070d2` touches `drift.c` in five related areas —
+declarations, the `SetSearchPathMode` removal, resolver generalization, the new
+wrappers, and `OpenFileInEditor` — plus its own tracker row, issue file, test
+runner, and new test file. `8501bfb` is documentation only. No unrelated
+cleanup, formatting, or refactoring.
+
+**Resolution:** approved with no requested changes. No finding requires a change
+to this commit set, so the item closes as `Verified`. Finding 1 is actioned as a
+note in DRIFT-001's review round; findings 2 and 3 are recorded observations for
+the maintainer. Recorded by the reviewer under section 6 because no implementer
+was present in the session; no implementer-authored section of this file was
+modified.
