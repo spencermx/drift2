@@ -2,13 +2,13 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Awaiting review`
+**Current status:** `Verified`
 **Reported:** 2026-07-25
 **Initial severity:** High
 **Final severity:** High
 **Primary locations:** `drift.c:1163`, `drift.c:1217`, `drift.c:1269`
 **Implemented by:** Codex
-**Reviewed by:** —
+**Reviewed by:** Claude: approved with residual risk
 **Decision owner:** User unless explicitly delegated
 
 ## Trigger and impact
@@ -167,12 +167,88 @@ requested` using the format in `quality/README.md`.
 | 2026-07-25 | User | `Investigating` | `Fix planned` | Approved the explicit absolute launcher-resolution approach and authorized implementation. |
 | 2026-07-25 | Codex | `Fix planned` | `Fixing` | Began the approved production change and regression coverage. |
 | 2026-07-25 | Codex | `Fixing` | `Awaiting review` | Implemented absolute launcher resolution, passed focused and full validation, and prepared the independent-review handoff. |
+| 2026-07-25 | Claude | `Awaiting review` | `Verified` | Independent review approved the complete commit set with residual risk; opened DRIFT-031 for a separate concern found during review. |
 
 ## Review history
 
-### Round 1 — pending
+### Round 1 — Claude, 2026-07-25
 
-- **Eligible reviewer:** Any reviewer whose stable identity is not `Codex`.
-- **Commit set:** Locate with the `Audit-ID: DRIFT-001` trailer after the
-  isolated implementation commit is created.
-- **Verdict:** Pending independent review.
+- **Reviewer:** `Claude` (Opus 5). Not present in `Implemented by`, so eligible.
+- **Commit set:** `a9e75bd` "Fix DRIFT-001: resolve Claude launcher safely" —
+  the only commit carrying the `Audit-ID: DRIFT-001` trailer. Confirmed with
+  `git log --all --grep="Audit-ID: DRIFT-001"`; no follow-ups exist.
+- **Verdict:** `Approved with residual risk`.
+
+**Acceptance criteria:** all nine pass. Criteria 1 and 2 pass at the unit level
+plus code inspection of the wiring at `drift.c:1306-1307`, which supplies a
+non-null absolute `lpApplicationName`; see finding 3 for why no automated test
+covers that step. Criterion 9 verified by inspection: `drift.c:1270-1290` is
+unchanged and its early return precedes launcher resolution.
+
+**Tests run by the reviewer:** `cmd /c tests\run_tests.bat` — ALL CHECKS PASSED,
+4/4 stages, 17/17 launcher tests under AddressSanitizer, plus the `/W4 /WX`
+compile. A `'vswhere.exe' is not recognized` line precedes stage 1;
+`run_tests.bat:14-23` is untouched by this commit, `cl` was still located, and
+every stage ran, so this is pre-existing and out of scope.
+
+Additional read-only checks: hand-traced the `PATH` tokenizer at
+`drift.c:1163-1200` for termination and trim/rescan correctness across
+quoted-semicolon, whitespace-only, and unterminated-quote entries — `start`
+always advances past a separator, so it terminates; confirmed every `snprintf`
+path fails closed rather than truncating, including an over-long session id;
+confirmed `IsSafeSessionId` (`drift.c:1067-1075`) admits only hex digits and
+`-`, excluding `%`, `&`, and `"`; confirmed `IsPathSlash` duplicates no existing
+helper.
+
+**Findings — three, all Low, none blocking:**
+
+1. *The workspace anchor remains an implicit executable-search directory on the
+   `.cmd` path.* `BuildClaudeProcessSpec` (`drift.c:1250-1256`) launches shims
+   through `cmd.exe`, and `LaunchClaudeIn` (`drift.c:1306-1307`) passes `anchor`
+   as the child working directory. Cmd's command search includes its current
+   directory, so any bare command name the shim itself invokes resolves from the
+   untrusted anchor first. Reproduced with the exact command line this code
+   generates: a `claude.cmd` containing a bare `driftprobe` executed a planted
+   `driftprobe.cmd` from the anchor. This makes design point 6 above accurate for
+   Drift's own resolution but overstated for the command processor Drift starts.
+   Tracked separately as DRIFT-031; see that file for evidence and a validation
+   warning about a false negative.
+2. *New silent-failure mode when no launcher resolves.* `drift.c:1294-1297`
+   returns 1 before any console switch, and the callers at `drift.c:2822`,
+   `drift.c:2824`, and `drift.c:2891` return that straight into the main loop
+   with no message. Before this fix, `cmd /c claude` always started and cmd
+   itself printed `'claude' is not recognized...` into the original screen
+   buffer, leaving a diagnostic in scrollback. The statement under "Security,
+   data-integrity, and error paths" that the launch-error message is unchanged is
+   therefore not quite right: Drift never had its own message, but the
+   cmd-supplied one is gone. A user whose Claude is a `.bat`, or reachable only
+   through a relative `PATH` entry, now sees Enter and N do nothing at all.
+   Impact is bounded because the native installer produces `claude.exe` and npm
+   produces `claude.cmd`, both covered.
+3. *No regression coverage for the `LaunchClaudeIn` wiring itself.* All 17 tests
+   call `ResolveClaudeLauncherFromPath` and `BuildClaudeProcessSpec` directly.
+   Restoring `CreateProcess(NULL, "cmd /c claude ...")` at `drift.c:1306` while
+   leaving the resolver in place would keep every test green. The mitigation
+   claimed under "Acceptance criteria and implementer evidence" — that a
+   reversion fails to build — holds only for a reversion that also deletes the
+   resolver. A true end-to-end test would need to intercept `CreateProcess`, so
+   the gap is reasonable; it is recorded here rather than treated as a defect.
+
+**Scope check:** clean. Five hunks in `drift.c` — header comment, type
+declarations, forward declarations, the new resolver block, and `LaunchClaudeIn`
+— all belonging to DRIFT-001. The `TRACKER.md` change is the single-row status
+update. No unrelated cleanup, formatting, or refactoring.
+
+**Reviewer-recorded residual risk**, preserved here under section 6 rather than
+merged into the implementer's section: findings 1 and 3 above, which the
+implementer record did not state. Finding 1 is the material one — the fix is a
+strict improvement over the prior behavior and closes both reported lookups, but
+it does not make the anchor inert for commands a `.cmd` shim invokes.
+
+**Resolution:** approved without requested changes. No finding requires a change
+to this commit set, so the item closes as `Verified` with the residual risk
+recorded. Finding 1 is carried forward as DRIFT-031 per section 7's
+separate-valid-concern rule; findings 2 and 3 are accepted as recorded risk. No
+implementer response is required. Per section 6, this round was recorded by the
+reviewer because no implementer was present in the session; no
+implementer-authored section of this file was modified.
