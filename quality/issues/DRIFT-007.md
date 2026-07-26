@@ -7,7 +7,7 @@ Tracker: [`TRACKER.md`](../TRACKER.md)
 **Initial severity:** Medium
 **Confirmed severity:** Medium
 **Primary locations:** `drift.c:HandleDeleteSession`, session-view input and
-rendering paths; proposed `tests/session_delete_test.c` and `tests/run_tests.bat`
+rendering paths; `tests/session_delete_test.c` and `tests/run_tests.bat`
 **Implemented by:** Codex
 **Reviewed by:** Claude: approved with residual risk
 **Decision owner:** User unless explicitly delegated
@@ -493,3 +493,27 @@ implementer-authored section of this file was modified.
 | 2026-07-26 | Codex | `Fix planned` | `Fixing` | Began the isolated session-delete modal repair and focused regression implementation. |
 | 2026-07-26 | Codex | `Fixing` | `Awaiting review` | Repainted and recentered the session-delete prompt after resize, failed closed on incomplete visibility, preserved DRIFT-003 cleanup behavior, and added 16 production-linked modal cases; all ten validation stages pass. |
 | 2026-07-26 | Claude | `Awaiting review` | `Verified` | Independent review approved with residual risk: ten-stage suite, optimized build, and `/analyze` re-run; five of six modal mutants including the original defect are detected, but a first-resize-only repaint survives the suite, so a reviewer probe confirmed the shipped handler repaints on every resize and centers in the latest window. DRIFT-003 compatibility re-confirmed byte-for-byte and it remains `Verified` under rule 6. |
+| 2026-07-26 | Codex | `Verified` | `Verified` | Rechecked the complete quality folder after Round 1. Preserved the repeated-resize and harness-classification follow-ups for later test hardening, corrected two post-review record details below, and left Claude's verdict and authored review text unchanged. |
+
+## Record maintenance
+
+**2026-07-26 — Codex; post-review follow-up preservation.** Round 1 findings 1
+and 2 remain the canonical record of two optional test-only improvements: add
+a permanent `resize, resize, Y` sequence that requires three complete popup
+paints, and replace or strengthen the harness's heuristic popup/screen write
+classification. Claude's production probe established that the shipped handler
+already behaves correctly; neither item is a reopened production defect, and
+no follow-up implementation has yet been authorized.
+
+Round 1 says at one point that the shell interceptor "always returns a failure
+code." The real shell function is indeed unreachable, which is the relevant
+safety property, but the interceptor is deliberately configurable:
+`test_shell_result` defaults to `ERROR_ACCESS_DENIED`, while the DRIFT-003
+partial-result case sets it to zero to simulate successful recycling and reach
+the isolated metadata-cleanup path. This clarification preserves Claude's
+review text rather than rewriting it and does not affect the verdict, test-data
+isolation, or compatibility conclusion.
+
+The metadata above also drops the stale word "proposed" from the now-implemented
+test locations. No code, test, status, severity, attribution, or review verdict
+changes in this maintenance update.
