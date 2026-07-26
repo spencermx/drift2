@@ -61,7 +61,7 @@ can discover the complete commit set without the user supplying hashes.
 
 | ID | Severity | Status | Finding | Primary location | Implemented by | Reviewed by | Decision / fix |
 |---|---|---|---|---|---|---|---|
-| [DRIFT-001](issues/DRIFT-001.md) | High | Fix planned | Claude launch can execute planted `cmd.exe` or `claude.*` | `drift.c:1122` | — | — | Explicit absolute launcher resolution approved |
+| [DRIFT-001](issues/DRIFT-001.md) | High | Awaiting review | Claude launch can execute planted `cmd.exe` or `claude.*` | `drift.c:1163`, `drift.c:1269` | Codex | — | Fix and regression suite pass; independent review required |
 | DRIFT-002 | High | Untriaged | Vim lookup can execute a planted `vim.exe` | `drift.c:375`, `drift.c:2993` | — | — | — |
 | DRIFT-003 | Medium | Untriaged | Name metadata can be replaced by a truncated file | `drift.c:998` | — | — | — |
 | DRIFT-004 | Medium | Untriaged | Settings JSON scanner can edit the wrong object | `drift.c:1908`, `drift.c:2156` | — | — | — |
