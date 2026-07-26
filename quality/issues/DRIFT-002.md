@@ -6,8 +6,9 @@ Tracker: [`TRACKER.md`](../TRACKER.md)
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** High
 **Final severity:** High
-**Primary locations:** `drift.c:1125-1249` (shared resolver),
-`drift.c:3192-3231` (`OpenFileInEditor`), `tests/vim_resolver_test.c`
+**Primary locations:** `drift.c:ResolveAllowedFileFromPath`,
+`drift.c:ResolveVim`, `drift.c:OpenFileInEditor`,
+`tests/vim_resolver_test.c`
 **Implemented by:** Codex
 **Reviewed by:** Claude: approved
 **Decision owner:** User unless explicitly delegated
@@ -227,8 +228,9 @@ Safe optional manual validation for the independent reviewer:
 ## User disposition
 
 The user approved the recommended shared-resolver design. Codex implemented and
-validated it as an isolated, attributed fix. Independent approval is now
-required; the implementer cannot mark this item `Verified`.
+validated it as an isolated, attributed fix. Claude then independently approved
+the complete commit set with no requested changes, so this item is `Verified`.
+The implementer did not approve its own work.
 
 ## Independent review handoff
 
@@ -337,3 +339,13 @@ note in DRIFT-001's review round; findings 2 and 3 are recorded observations for
 the maintainer. Recorded by the reviewer under section 6 because no implementer
 was present in the session; no implementer-authored section of this file was
 modified.
+
+## Record maintenance
+
+**2026-07-25 — Codex; documentation only.** In response to Round 1's first and
+third records-level observations, the commit adding this section carries both
+`Audit-ID: DRIFT-001` and `Audit-ID: DRIFT-002`, explicitly bridges the shared
+refactor into DRIFT-001's discoverable history, and updates `quality/README.md`
+to define repeatable audit IDs plus the optional `Reported-by:` and
+`Investigated-by:` trailers. It does not amend reviewed commits or change the
+reviewer's text, verdict, or evidence.
