@@ -211,6 +211,8 @@ void ExitAnchorMode();
 void HandleQuickAdd();
 bool ResolveClaudeLauncherFromPath(const char* path_value, ClaudeLauncher* out);
 bool ResolveClaudeLauncher(ClaudeLauncher* out);
+bool ResolveVimFromPath(const char* path_value, char out[MAX_PATH]);
+bool ResolveVim(char out[MAX_PATH]);
 bool BuildClaudeProcessSpec(const ClaudeLauncher* launcher, const char* session_id,
                             ClaudeProcessSpec* out);
 int LaunchClaudeIn(const char* anchor, const char* session_id);
@@ -391,11 +393,6 @@ int main(int argc, char* argv[]) {
 }
 
 void Initialize() {
-    // Keep the process current directory out of the executable search path.
-    // Without this, SearchPath prefers the directory drift was launched from,
-    // so a vim.exe planted there would be picked over the real one
-    SetSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE | BASE_SEARCH_PATH_PERMANENT);
-
     hIn = GetStdHandle(STD_INPUT_HANDLE);
     hOriginal = GetStdHandle(STD_OUTPUT_HANDLE);
 
@@ -1125,8 +1122,10 @@ static bool IsAbsolutePathEntry(const char* path, size_t len) {
     return drive_rooted || unc_or_device;
 }
 
-static bool FindClaudeInPathEntry(const char* entry, size_t len,
-                                  ClaudeLauncher* out) {
+static bool FindAllowedFileInPathEntry(const char* entry, size_t len,
+                                       const char* const names[],
+                                       size_t name_count, char out[MAX_PATH],
+                                       size_t* out_name_index) {
     if (!IsAbsolutePathEntry(entry, len) || len >= MAX_PATH) return false;
 
     char dir[MAX_PATH];
@@ -1136,12 +1135,8 @@ static bool FindClaudeInPathEntry(const char* entry, size_t len,
         if (dir[i] == '"') return false;
     }
 
-    const char* names[] = { "claude.exe", "claude.cmd" };
-    enum ClaudeLauncherKind kinds[] = {
-        CLAUDE_LAUNCHER_EXE, CLAUDE_LAUNCHER_CMD
-    };
     const char* separator = len > 0 && IsPathSlash(dir[len - 1]) ? "" : "\\";
-    for (int i = 0; i < 2; i++) {
+    for (size_t i = 0; i < name_count; i++) {
         char candidate[MAX_PATH];
         int written = snprintf(candidate, sizeof(candidate), "%s%s%s",
                                dir, separator, names[i]);
@@ -1149,20 +1144,24 @@ static bool FindClaudeInPathEntry(const char* entry, size_t len,
         DWORD attributes = GetFileAttributes(candidate);
         if (attributes != INVALID_FILE_ATTRIBUTES &&
             !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            strcpy(out->path, candidate);
-            out->kind = kinds[i];
+            strcpy(out, candidate);
+            if (out_name_index != NULL) *out_name_index = i;
             return true;
         }
     }
     return false;
 }
 
-// Resolve only from explicit, fully-qualified PATH entries. Empty and relative
-// entries have current-directory semantics in Windows command search and must
-// never be allowed to reintroduce the workspace as an executable source.
-bool ResolveClaudeLauncherFromPath(const char* path_value, ClaudeLauncher* out) {
-    out->path[0] = '\0';
-    out->kind = CLAUDE_LAUNCHER_NONE;
+// Resolve only an explicit allowlist of filenames from fully-qualified PATH
+// entries. Empty and relative entries have current-directory semantics in
+// Windows command search and must never reintroduce the workspace as an
+// executable source.
+static bool ResolveAllowedFileFromPath(const char* path_value,
+                                       const char* const names[],
+                                       size_t name_count, char out[MAX_PATH],
+                                       size_t* out_name_index) {
+    out[0] = '\0';
+    if (out_name_index != NULL) *out_name_index = name_count;
     if (path_value == NULL) return false;
 
     const char* start = path_value;
@@ -1184,7 +1183,8 @@ bool ResolveClaudeLauncherFromPath(const char* path_value, ClaudeLauncher* out) 
             start++;
             end--;
         }
-        if (FindClaudeInPathEntry(start, (size_t)(end - start), out)) {
+        if (FindAllowedFileInPathEntry(start, (size_t)(end - start), names,
+                                       name_count, out, out_name_index)) {
             return true;
         }
 
@@ -1199,9 +1199,10 @@ bool ResolveClaudeLauncherFromPath(const char* path_value, ClaudeLauncher* out) 
     return false;
 }
 
-bool ResolveClaudeLauncher(ClaudeLauncher* out) {
-    out->path[0] = '\0';
-    out->kind = CLAUDE_LAUNCHER_NONE;
+static bool ResolveAllowedFile(const char* const names[], size_t name_count,
+                               char out[MAX_PATH], size_t* out_name_index) {
+    out[0] = '\0';
+    if (out_name_index != NULL) *out_name_index = name_count;
     DWORD required = GetEnvironmentVariable("PATH", NULL, 0);
     if (required == 0) return false;
 
@@ -1209,9 +1210,43 @@ bool ResolveClaudeLauncher(ClaudeLauncher* out) {
     if (path_value == NULL) return false;
     DWORD length = GetEnvironmentVariable("PATH", path_value, required);
     bool found = length > 0 && length < required &&
-        ResolveClaudeLauncherFromPath(path_value, out);
+        ResolveAllowedFileFromPath(path_value, names, name_count, out,
+                                   out_name_index);
     free(path_value);
     return found;
+}
+
+bool ResolveClaudeLauncherFromPath(const char* path_value, ClaudeLauncher* out) {
+    const char* names[] = { "claude.exe", "claude.cmd" };
+    size_t name_index;
+    out->path[0] = '\0';
+    out->kind = CLAUDE_LAUNCHER_NONE;
+    if (!ResolveAllowedFileFromPath(path_value, names, 2, out->path,
+                                    &name_index)) {
+        return false;
+    }
+    out->kind = name_index == 0 ? CLAUDE_LAUNCHER_EXE : CLAUDE_LAUNCHER_CMD;
+    return true;
+}
+
+bool ResolveClaudeLauncher(ClaudeLauncher* out) {
+    const char* names[] = { "claude.exe", "claude.cmd" };
+    size_t name_index;
+    out->path[0] = '\0';
+    out->kind = CLAUDE_LAUNCHER_NONE;
+    if (!ResolveAllowedFile(names, 2, out->path, &name_index)) return false;
+    out->kind = name_index == 0 ? CLAUDE_LAUNCHER_EXE : CLAUDE_LAUNCHER_CMD;
+    return true;
+}
+
+bool ResolveVimFromPath(const char* path_value, char out[MAX_PATH]) {
+    const char* names[] = { "vim.exe" };
+    return ResolveAllowedFileFromPath(path_value, names, 1, out, NULL);
+}
+
+bool ResolveVim(char out[MAX_PATH]) {
+    const char* names[] = { "vim.exe" };
+    return ResolveAllowedFile(names, 1, out, NULL);
 }
 
 bool BuildClaudeProcessSpec(const ClaudeLauncher* launcher, const char* session_id,
@@ -3160,15 +3195,12 @@ void OpenFileInEditor() {
         return; // mangled or over-long name -- could act on the wrong file
     }
 
-    // Resolve vim to an absolute path first. CreateProcess with a NULL
-    // lpApplicationName takes the program from the command line and searches
-    // drift's own directory and the process current directory *before* PATH,
-    // so a planted vim.exe would win; naming the executable outright makes it
-    // search nothing at all. (Initialize's SetSearchPathMode is what stops
-    // SearchPath from preferring the current directory in turn.)
+    // Resolve vim only from explicit absolute PATH entries. Naming the
+    // executable outright makes CreateProcess search nothing at all, while
+    // empty or relative PATH entries cannot reintroduce the workspace or the
+    // directory drift was launched from as an executable source.
     char vim_exe[MAX_PATH];
-    DWORD vim_len = SearchPath(NULL, "vim.exe", NULL, MAX_PATH, vim_exe, NULL);
-    bool have_vim = vim_len > 0 && vim_len < MAX_PATH;
+    bool have_vim = ResolveVim(vim_exe);
 
     char command[MAX_PATH + 16];
     snprintf(command, sizeof(command), "vim \"%s\"", file_path);

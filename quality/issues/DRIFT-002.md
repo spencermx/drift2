@@ -2,13 +2,13 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Investigating`
+**Current status:** `Awaiting review`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** High
 **Final severity:** High
-**Primary locations:** `drift.c:393` (`Initialize`), `drift.c:3157`
-(`OpenFileInEditor`)
-**Implemented by:** —
+**Primary locations:** `drift.c:1125-1249` (shared resolver),
+`drift.c:3192-3231` (`OpenFileInEditor`), `tests/vim_resolver_test.c`
+**Implemented by:** Codex
 **Reviewed by:** —
 **Decision owner:** User unless explicitly delegated
 
@@ -110,7 +110,7 @@ turn an untrusted current directory into an executable source.
    return a typed absolute match. Claude continues checking `claude.exe` then
    `claude.cmd` within each directory; Vim checks only `vim.exe`.
 
-## Recommended implementation
+## Agreed design
 
 Refactor the already-tested DRIFT-001 path tokenizer and directory probe into a
 small generic internal resolver, preserving Claude's behavior byte-for-byte at
@@ -129,25 +129,89 @@ so its complete launcher test suite must remain green and the DRIFT-002 reviewer
 must inspect that compatibility explicitly. It does not reopen DRIFT-001 unless
 Claude launch behavior actually changes.
 
-## Proposed acceptance criteria and regression coverage
+The user approved this design before production or test edits began.
 
-- A planted current-directory `vim.exe` is never selected when no legitimate
-  Vim exists on the absolute search path.
-- Empty, `.`, drive-relative, root-relative, and named relative `PATH` entries
-  are ignored.
-- Fully qualified `PATH` directory order is preserved.
-- Quoted absolute directories containing spaces and semicolons resolve.
-- A directory named `vim.exe` is not accepted as an executable file.
-- A safe absolute Vim path is passed as non-null `lpApplicationName`; the file
-  path remains a quoted argument and the displayed directory remains the child
-  working directory.
-- No safe Vim match takes the existing default-application fallback.
-- The process-wide `SetSearchPathMode` call and its inaccurate comment are
-  removed once no production code uses `SearchPath` for executable discovery.
-- All DRIFT-001 `.exe` and `.cmd` ordering, quoting, metacharacter, session, and
-  real-child-process tests continue to pass unchanged.
-- The full regression suite, optimized build, and warning-clean compilation
-  pass.
+## Implementation
+
+- `FindAllowedFileInPathEntry`, `ResolveAllowedFileFromPath`, and
+  `ResolveAllowedFile` now hold the shared absolute-entry validation, quoted
+  semicolon-aware tokenization, ordered filename probing, file-type rejection,
+  and dynamically sized environment read.
+- The Claude wrappers still request `claude.exe` followed by `claude.cmd` in
+  each directory and map that ordered result back to the existing launcher
+  kind. No Claude process-spec or process-launch behavior changed.
+- `ResolveVimFromPath` and `ResolveVim` allow only `vim.exe`. `OpenFileInEditor`
+  uses the returned absolute path as `CreateProcess`'s non-null
+  `lpApplicationName`.
+- The Vim command line still contains the quoted selected file, the displayed
+  directory is still the child working directory, and resolution or launch
+  failure still uses the existing `ShellExecute` fallback.
+- The obsolete process-wide `SetSearchPathMode` call was removed. No production
+  `SearchPath` call remains.
+- `tests/vim_resolver_test.c` exercises the production translation unit and
+  adds source-wiring guards so restoring the unsafe lookup or disconnecting the
+  safe resolver from `CreateProcess` fails the Windows suite.
+
+## Security, compatibility, and error paths
+
+The security boundary is now explicit: only an existing non-directory
+`vim.exe` under a fully qualified `PATH` entry can be selected. Empty, relative,
+drive-relative, and root-relative entries cannot be expanded through Drift's
+process current directory. `CreateProcess` receives the resolved absolute path,
+so it performs no second executable search.
+
+Claude compatibility is material because the implementation shares its
+resolver internals with DRIFT-001. The unchanged 17-case Claude suite verifies
+directory order, `.exe`/`.cmd` precedence, quoted and metacharacter-bearing
+paths, session validation, command construction, and real child processes.
+
+If safe resolution finds nothing, or if the selected Vim cannot be launched,
+Drift follows the pre-existing default-application fallback. This fix does not
+alter the selected file argument, console-buffer transitions, wait behavior,
+child working directory, or post-editor directory reload.
+
+## Acceptance criteria and implementer evidence
+
+| Criterion | Result | Evidence |
+|---|---|---|
+| A planted current-directory `vim.exe` is not selected when omitted from the absolute search path. | Pass | Dedicated missing, empty, and invalid-`PATH` fixture cases in `tests/vim_resolver_test.c:118-126`. |
+| Empty, `.`, named relative, drive-relative, and root-relative entries are ignored. | Pass | Combined invalid-entry test plants reachable files under the test cwd and resolves none. |
+| Fully qualified directory order is preserved. | Pass | Both orderings are exercised at `tests/vim_resolver_test.c:128-141`. |
+| Quoted absolute directories containing spaces and semicolons resolve. | Pass | Quoted fixture at `tests/vim_resolver_test.c:143-147`. |
+| A directory named `vim.exe` is rejected. | Pass | Directory-only fixture at `tests/vim_resolver_test.c:149-150`. |
+| The safe absolute path is passed directly to `CreateProcess`; file quoting and displayed-directory cwd remain. | Pass | Production wiring at `drift.c:3203-3225`; source regression guard at `tests/vim_resolver_test.c:171-173`. |
+| No safe Vim match retains the default-application fallback. | Pass | Production branch at `drift.c:3224-3231`; source regression guard at `tests/vim_resolver_test.c:174-176`. |
+| Obsolete implicit-search state is absent. | Pass | No production `SearchPath` or `SetSearchPathMode` call; asserted at `tests/vim_resolver_test.c:168-170`. |
+| DRIFT-001 behavior remains compatible. | Pass | All 17 unchanged Claude launcher tests pass under AddressSanitizer. |
+| Full regression, optimized build, and warning checks pass. | Pass | Commands and results below. |
+
+The new suite would detect the pre-fix implementation: the production Vim
+wrapper did not exist, and its source guard rejects both `SearchPath` and
+`SetSearchPathMode` while requiring the safe resolver-to-`CreateProcess`
+wiring.
+
+## Validation performed
+
+- `cmd.exe /d /c tests\run_tests.bat` — `ALL CHECKS PASSED`, all five stages:
+  source lint, general AddressSanitizer regressions, 17 Claude launcher cases,
+  13 Vim resolver/wiring cases, and `/W4 /WX` production compilation.
+- `cmd.exe /d /c build.bat` — optimized `drift.exe` build succeeded.
+- MSVC `cl /nologo /W4 /wd4459 /analyze /c drift.c` — completed successfully;
+  only the established 32,900-byte stack-frame warning and two established
+  shadowing warnings were reported.
+- `git diff --check` — passed.
+- Production-source search — no `SearchPath(` or `SetSearchPathMode(` remains.
+
+Safe optional manual validation for the independent reviewer:
+
+1. Put a harmless sentinel executable named `vim.exe` in Drift's process
+   current directory, omit that directory and every real Vim from `PATH`, and
+   open a file. The sentinel must not run; Drift should use the default app.
+2. Put a real or harmless sentinel `vim.exe` in an explicit absolute `PATH`
+   directory and open a file. Confirm that executable receives the selected
+   file and the directory shown by Drift as its working directory.
+3. Re-run the Windows test suite and inspect the unchanged Claude cases because
+   their resolver internals are shared.
 
 ## Non-goals and residual risk
 
@@ -160,10 +224,29 @@ Claude launch behavior actually changes.
 - The fallback `ShellExecute` working-directory issue is already tracked
   separately as DRIFT-012.
 
-## User disposition needed
+## User disposition
 
-The diagnosis and recommended design are ready for user disposition. No
-production or test code has been changed for DRIFT-002.
+The user approved the recommended shared-resolver design. Codex implemented and
+validated it as an isolated, attributed fix. Independent approval is now
+required; the implementer cannot mark this item `Verified`.
+
+## Independent review handoff
+
+Locate the complete commit set by audit trailer rather than relying on a hash
+copied from conversation history:
+
+```text
+git log --all --reverse --format="%H %s" --grep="Audit-ID: DRIFT-002"
+git show --stat --patch <commit>
+```
+
+Read `quality/README.md`, inspect every returned commit and the surrounding
+resolver/editor code, run `cmd /c tests\run_tests.bat`, and evaluate each
+acceptance criterion above. Pay particular attention to the shared-resolver
+refactor's Claude compatibility, absolute-path validation, quote/semicolon
+tokenization, direct non-null `lpApplicationName`, fallback preservation, and
+the scope of the isolated commit. Report `Approved`, `Approved with residual
+risk`, or `Changes requested` using the workflow's required review format.
 
 ## Decision history
 
@@ -171,3 +254,12 @@ production or test code has been changed for DRIFT-002.
 |---|---|---|---|---|
 | 2026-07-25 | Codex | — | `Untriaged` | Recorded by the comprehensive application review as a possible executable-search hijack. |
 | 2026-07-25 | Codex | `Untriaged` | `Investigating` | Confirmed safe mode still selects a planted current-directory `vim.exe` when no earlier match exists; documented options and recommended shared absolute-path resolution. |
+| 2026-07-25 | User | `Investigating` | `Fix planned` | Approved the recommended shared absolute-`PATH` resolver design. |
+| 2026-07-25 | Codex | `Fix planned` | `Fixing` | Began the isolated implementation and regression coverage. |
+| 2026-07-25 | Codex | `Fixing` | `Awaiting review` | Implemented absolute Vim resolution, preserved Claude and fallback behavior, passed focused and full validation, and prepared the independent-review handoff. |
+
+## Review history
+
+No independent review has been recorded. The next eligible reviewer must not
+be listed in `Implemented by` and must add a chronological review round under
+the protocol in `quality/README.md`.
