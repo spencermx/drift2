@@ -64,7 +64,7 @@ can discover the complete commit set without the user supplying hashes.
 |---|---|---|---|---|---|---|---|
 | [DRIFT-001](issues/DRIFT-001.md) | High | Verified | Claude launch can execute planted `cmd.exe` or `claude.*` | `drift.c:ResolveClaudeLauncherFromPath`, `drift.c:LaunchClaudeIn` | Codex | Claude: approved with residual risk | Fixed in `a9e75bd`; residual risk carried to DRIFT-031 |
 | [DRIFT-002](issues/DRIFT-002.md) | High | Verified | Vim lookup can execute a planted `vim.exe` | `drift.c:ResolveVim`, `drift.c:OpenFileInEditor` | Codex | Claude: approved | Fixed in `e1070d2` with shared absolute-`PATH` resolution; DRIFT-001 compatibility re-verified |
-| DRIFT-003 | Medium | Untriaged | Name metadata can be replaced by a truncated file | `drift.c:SetNameEntry` | — | — | — |
+| [DRIFT-003](issues/DRIFT-003.md) | Medium | Investigating | Name metadata can be replaced by a truncated file | `drift.c:SetNameEntry` | — | — | Confirmed; fail-closed streaming rewrite recommended |
 | DRIFT-004 | Medium | Untriaged | Settings JSON scanner can edit the wrong object | `drift.c:FindArraySpan`, `drift.c:SaveMembersTo` | — | — | — |
 | DRIFT-005 | Medium | Untriaged | Concurrent workspace member changes can be overwritten | `drift.c:LoadMembersFrom`, `drift.c:SaveMembersTo` | — | — | — |
 | DRIFT-006 | Medium | Untriaged | Relative `additionalDirectories` resolve against the wrong location | `drift.c:LoadMembersFrom`, `drift.c:FindMember` | — | — | — |
@@ -94,3 +94,4 @@ can discover the complete commit set without the user supplying hashes.
 | DRIFT-030 | Low | Untriaged | Wine launch-file short writes are treated as success | `drift.c:LaunchClaudeIn` | — | — | — |
 | [DRIFT-031](issues/DRIFT-031.md) | Low | Untriaged | A `.cmd` launcher shim resolves bare commands from the workspace anchor | `drift.c:BuildClaudeProcessSpec`, `drift.c:LaunchClaudeIn` | — | — | Found reviewing DRIFT-001; residual of the same threat class |
 | [DRIFT-032](issues/DRIFT-032.md) | Low | Untriaged | Failure to resolve a safe Claude launcher produces no visible error | `drift.c:LaunchClaudeIn`, `drift.c:HandleInput` | — | — | Found reviewing DRIFT-001; preserved as an independent UX regression |
+| [DRIFT-033](issues/DRIFT-033.md) | Medium | Untriaged | Concurrent name metadata updates can overwrite each other | `drift.c:SetNameEntry` | — | — | Found investigating DRIFT-003; independent successful-I/O race |
