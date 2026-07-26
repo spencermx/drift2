@@ -2,10 +2,11 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Untriaged`
+**Current status:** `Not a bug`
 **Reported:** 2026-07-26; Claude, while independently reviewing
 [DRIFT-006](DRIFT-006.md)
 **Initial severity:** Low
+**Final severity:** Low
 **Primary locations:** `drift.c:HandleQuickAdd`, `drift.c:ApplyMemberChange`,
 `drift.c:JumpToMemberAt`, `drift.c:HandleInput`
 **Implemented by:** —
@@ -79,8 +80,52 @@ confined to what the pane shows and where `Enter` navigates.
 - Is the membership state better held per-workspace rather than in one set of
   process globals?
 
+## Investigation and disposition
+
+The reported production trigger does not reach the state described above.
+`HandleInput` does allow modified keys to fall through the ordinary armed-edit
+key block, so `Shift+W` reaches the call expression for `HandleQuickAdd`.
+However, the first executable guard inside `HandleQuickAdd` is:
+
+```c
+if (claude_mode != CM_OFF || edit_armed || anchor_armed) return;
+```
+
+With the report's required `edit_armed == true` precondition, the function
+returns before reading a target, opening the workspace chooser, calling
+`ApplyMemberChange`, or invoking `LoadMembersFrom`. Consequently `members[]`,
+`member_count`, `member_anchor`, and `edit_workspace` remain the state loaded
+for workspace A. `JumpToMemberAt` continues resolving A's displayed rows from
+A's anchor, and focused removal continues operating on A's displayed list.
+
+Repository history confirms this is not a later repair. `git blame` attributes
+the `edit_armed` guard to `5cc15db` (2026-07-25 07:26 -0600), and
+`git merge-base --is-ancestor 5cc15db 0c1372c` succeeds. The guard therefore
+predates the comprehensive audit baseline and the DRIFT-006 implementation.
+Both `git show 0c1372c^:drift.c` and `git show 0c1372c:drift.c` contain it.
+
+The reviewer probe remains useful evidence about what would happen if the
+membership globals were forced to describe B while `edit_workspace` still
+described A. It does not establish that the stated `Shift+W` sequence can
+produce that prerequisite through production control flow. The probe must have
+bypassed the early guard or constructed the divergent globals directly.
+
+Whole-file call-site enumeration found no alternate production route that can
+load a different workspace while edit mode is armed. `LoadMembersFrom` is
+called by `EnterEditMode`, by `ApplyMemberChange` for edit-mode operations on
+`edit_workspace`, and by `HandleQuickAdd` only after the blocking guard.
+
+The user authorized closing this report after the contradiction was identified.
+DRIFT-035 is therefore **Not a bug as reported**. No production or regression
+change is required. If a different reachable path is later found that can
+diverge `member_anchor` from `edit_workspace`, it should be recorded from that
+concrete trigger rather than reopening this disproven one without new evidence.
+
 ## Decision history
 
 | Date | Actor | From | To | Summary |
 |---|---|---|---|---|
 | 2026-07-26 | Claude | — | `Untriaged` | Reported while independently reviewing DRIFT-006; reproduced the anchor divergence and wrong-anchor jump through production functions. The root cause is pre-existing global clobbering, so it is tracked separately rather than folded into that fix. |
+| 2026-07-26 | Codex | `Untriaged` | `Investigating` | Traced the complete `Shift+W` path, enumerated membership-load call sites, and checked the guard's Git ancestry after the reviewer report conflicted with current production control flow. |
+| 2026-07-26 | Codex | `Investigating` | `Investigating` | Confirmed `HandleQuickAdd` returns immediately whenever `edit_armed` is true and that the guard predates both the audit and DRIFT-006; the probe demonstrated only a manually constructed divergent state, not the reported UI trigger. |
+| 2026-07-26 | User | `Investigating` | `Not a bug` | Authorized the proposed documentation correction and closure after the production guard and historical evidence showed the reported trigger cannot mutate membership state. |
