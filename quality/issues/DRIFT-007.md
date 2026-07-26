@@ -2,14 +2,14 @@
 
 Tracker: [`TRACKER.md`](../TRACKER.md)
 
-**Current status:** `Awaiting review`
+**Current status:** `Verified`
 **Reported:** 2026-07-25; comprehensive application review
 **Initial severity:** Medium
 **Confirmed severity:** Medium
 **Primary locations:** `drift.c:HandleDeleteSession`, session-view input and
 rendering paths; proposed `tests/session_delete_test.c` and `tests/run_tests.bat`
 **Implemented by:** Codex
-**Reviewed by:** —
+**Reviewed by:** Claude: approved with residual risk
 **Decision owner:** User unless explicitly delegated
 
 ## Trigger and impact
@@ -320,6 +320,168 @@ rows rather than treating green output as approval, and report `Approved`,
 `Approved with residual risk`, or `Changes requested` using the required
 quality workflow format.
 
+## Review history
+
+### Round 1 — Claude, 2026-07-26
+
+- **Reviewer:** `Claude` (Opus 5). Absent from `Implemented by`, so eligible.
+- **Commit set:** `ba5647f` "Investigate DRIFT-007: confirm hidden delete after
+  resize" (documentation only) and `a502428` "Fix DRIFT-007: repaint session
+  delete prompt on resize". `git log --all --reverse --format="%H %s"
+  --grep="Audit-ID: DRIFT-007"` returns these two and no others. `a502428` also
+  correctly appears under `--grep="Audit-ID: DRIFT-003"`.
+- **Verdict:** `Approved with residual risk`.
+
+**Acceptance criteria:** all ten pass, each re-verified by the reviewer rather
+than accepted from the evidence column.
+
+**Tests run by the reviewer:**
+
+- `cmd /d /c tests\run_tests.bat` — `ALL CHECKS PASSED`, ten stages, exit 0,
+  including 16/16 session-delete modal cases and 13/13 unchanged DRIFT-003
+  name-metadata cases.
+- `build.bat` — optimized `/O2` build succeeded; `drift.exe` removed afterward.
+- `cl /analyze /W4 /wd4459 /c drift.c` — exit 0. Three diagnostics, all in code
+  this fix does not touch: C6262 at `drift.c:4495`, C6244 at `drift.c:4761` and
+  `drift.c:4777`. None points into `HandleDeleteSession`.
+
+**The handoff's specific instructions were followed rather than accepting a
+green suite:**
+
+- *Event ordering.* `repaint` is cleared only immediately after a complete
+  successful write, and a resize record sets it before `continue`, so the loop
+  cannot reach the key dispatch without a current-geometry paint. Because
+  `ReadConsoleInput` is FIFO, a queued resize is always consumed before a queued
+  `Y`.
+- *Complete returned-region check.* `written` is seeded from `requested` and
+  compared on all four edges after the call, so a clipped-but-successful paint
+  fails closed. Verified by mutation, below.
+- *Cancellation before key dispatch.* Geometry-query, undersized-window,
+  allocation, write-failure, and clipped-output paths all `return`. The function
+  body ends immediately after the modal loop, so `return` and `break` are
+  equivalent here and no post-loop cleanup is skipped.
+- *Stable target lifetime.* `sel` is captured once before the loop and the
+  destructive branch uses `sel->path`/`sel->id`, never
+  `sessions[session_selected]`. The repaint's `DrawScreen()` cannot invalidate
+  it: `DrawScreen` (`drift.c:471`) contains no `LoadSessionsFor` or
+  `ApplySessionNames` call, and the only drawing function that does reload —
+  `DrawClaudeInfoPane` at `drift.c:3092` — is reached solely from the
+  `claude_mode == CM_WORKSPACES` branch at `drift.c:828`, while this modal runs
+  in `CM_SESSIONS`. `DrawScreen`'s clamp of `session_selected` is therefore
+  harmless to the captured target.
+- *A second resize cannot re-arm a stale paint.* Correct in the implementation,
+  but **not covered by any permanent case** — see finding 1. Confirmed by a
+  reviewer probe, below.
+- *Harness cannot reach the real shell or user paths.* `SHFileOperation` is
+  macro-redirected before `../drift.c` is included, so the real symbol is
+  unreachable from that translation unit; the interceptor always returns a
+  failure code. `DRIFT_HOME` and `DRIFT_CLAUDE_DIR` point at one unique
+  nonexistent `%TEMP%` root and every transcript path is fake.
+- *The harness's visibility model does make the pre-fix implementation fail.*
+  `test_popup_visible` becomes true only on a complete popup paint and is
+  cleared by a resize, by an underlying-screen write, and by failed or clipped
+  paints, so a handler that paints once and then consumes a resize reaches the
+  shell boundary with visibility false. Mutant 1 confirms this empirically.
+
+**Reviewer-added mutation testing** (throwaway copies outside the repository; no
+repository file was modified). Six mutants of `HandleDeleteSession` compiled
+against the permanent session-delete and name-metadata suites:
+
+1. *Remove the `WINDOW_BUFFER_SIZE_EVENT` branch* — the original DRIFT-007
+   defect. **Caught**, 4 cases fail.
+2. *Set `repaint` but never call `DrawScreen`* — **caught**.
+3. *Accept a clipped paint as visible confirmation* — **caught**.
+4. *Center against the buffer origin instead of the current window origin* —
+   **caught**.
+5. *Remove the undersized-window cancellation* — **caught**.
+6. *Repaint on only the FIRST resize* — **NOT caught**; the whole suite passes.
+   See finding 1.
+
+Every mutant left the 13 DRIFT-003 name-metadata cases green.
+
+**Reviewer probe — repeated resize.** Because mutant 6 survived, the shipped
+behavior was checked directly with an intercepted harness driving the production
+handler:
+
+```text
+two resizes then Y: popup paints=3  screen redraws=2  shell_calls=1  visible=yes
+third paint region=(39,17)-(82,23)  expected (39,17)-(82,23)
+later undersized resize then Y: shell_calls=0
+three resizes then N:           shell_calls=0
+```
+
+Each resize forces its own repaint, the final paint is centered in the *latest*
+window, a later undersized resize cancels rather than arming, and `N` still
+cancels. **The implementation is correct; only the coverage is missing.**
+
+**DRIFT-003 compatibility — explicitly re-confirmed, as the shared
+`Audit-ID: DRIFT-003` requires.** The deletion and saved-name-cleanup block was
+extracted from both `git show 6387846:drift.c` and the current file and compared:
+the 32-line region from `if (vk == 'Y')` through the `N`/Escape line is
+**byte-identical** to its reviewed form. Successful deletion still attempts
+`SetSessionName(..., "")`, cleanup failure is still recorded only inside the
+successful-`SHFileOperation` branch and reported after the reload, input is still
+flushed, and the session list still reloads and clamps. All 13 metadata cases
+pass unchanged and stayed green under all six mutants, and the new
+"DRIFT-003 cleanup failure still reports the partial result" case exercises the
+partial-outcome path through the modal. DRIFT-003's accepted behavior did not
+change, so it remains `Verified` under rule 6.
+
+**Findings — no defect in the fix. Three items:**
+
+1. *No permanent case queues two resizes, so the handoff's own "a second resize
+   cannot re-arm a stale paint" requirement is unverified by the suite.* Mutant 6
+   — repaint on the first resize only — passes all 16 session-delete cases while
+   leaving a later `Y` armed behind an erased prompt, which is precisely the
+   defect this item exists to close. The shipped code is correct, as the probe
+   above shows; the gap is in coverage. A case queueing resize, resize, `Y` and
+   requiring three complete paints plus visibility at the shell boundary would
+   close it, and the harness already supports it — `QueueResize` can be called
+   twice and `TEST_SCRIPT_CAPACITY` is 16.
+2. *The harness's popup/screen discrimination is heuristic.*
+   `tests/session_delete_test.c:70` classifies a write as the popup when
+   `buffer_size.Y == 7 && source[0].Char.UnicodeChar == L'\x250C'`. A
+   full-screen `DrawScreen` write into a seven-row console whose first cell is
+   the frame's top-left corner would be misclassified as a popup paint. No
+   current case uses a seven-row window, so nothing is wrong today, but a future
+   case at that geometry would silently corrupt the paint accounting rather than
+   fail loudly.
+3. *`DRIFT-003` was left `Verified` rather than moved to `Awaiting review` while
+   its compatibility was pending.* Rule 6 says a previously `Verified` affected
+   item returns to `Awaiting review` until an eligible reviewer confirms
+   compatibility, then may go directly back to `Verified`. The record instead
+   kept it `Verified` and asked the reviewer to re-confirm. The end state is
+   correct — compatibility is confirmed above and DRIFT-003 stays `Verified` —
+   so this is a process note, not a defect. The audit-trail half of rule 6 was
+   handled well: `a502428` does repeat `Audit-ID: DRIFT-003`, so the shared
+   change is discoverable, which is the improvement this reviewer asked for in
+   DRIFT-006 Round 1 finding 1.
+
+**Checked and dismissed:** `popup_w` only ever shrinks from 44, so the
+allocation is bounded at 44 × 7 `CHAR_INFO`; `written` is correctly used as the
+in/out region argument; `WriteConsoleOutputW` clips to the screen buffer while
+the popup is positioned inside `srWindow`, which is contained in that buffer, so
+an unclipped paint is the normal case and clipping is genuinely exceptional;
+`const int popup_h` is a harmless tightening; the modal cannot change
+`claude_mode`, so the `CM_SESSIONS` reasoning above holds for the whole loop;
+unrelated key-down events still fall through without disarming, matching the
+declared non-goal; and no `free` is missed on any early return, since `popup` is
+released before every visibility check.
+
+**Scope check:** clean. `a502428` restructures only `HandleDeleteSession`, adds
+`tests/session_delete_test.c`, inserts one stage in `tests/run_tests.bat`, and
+updates this issue file and its own tracker row. It does not touch the shell
+flags, the reload/clamp, the DRIFT-003 block, or any other modal handler, and it
+correctly does not claim the modifier/key-repeat policy or unobservable external
+console corruption.
+
+**Resolution:** approved with residual risk. No finding requires a change to
+this commit set: finding 1 asks for one additional regression case rather than a
+production change, finding 2 is latent harness fragility, and finding 3 is a
+process note whose end state is already correct. Recorded by the reviewer under
+section 6 because no implementer was present in the session; no
+implementer-authored section of this file was modified.
+
 ## Decision history
 
 | Date | Actor | From | To | Summary |
@@ -330,3 +492,4 @@ quality workflow format.
 | 2026-07-26 | User | `Investigating` | `Fix planned` | Approved current-geometry repaint/recenter, cancellation when the prompt cannot be shown completely, production-linked regression coverage, and DRIFT-003 compatibility validation. |
 | 2026-07-26 | Codex | `Fix planned` | `Fixing` | Began the isolated session-delete modal repair and focused regression implementation. |
 | 2026-07-26 | Codex | `Fixing` | `Awaiting review` | Repainted and recentered the session-delete prompt after resize, failed closed on incomplete visibility, preserved DRIFT-003 cleanup behavior, and added 16 production-linked modal cases; all ten validation stages pass. |
+| 2026-07-26 | Claude | `Awaiting review` | `Verified` | Independent review approved with residual risk: ten-stage suite, optimized build, and `/analyze` re-run; five of six modal mutants including the original defect are detected, but a first-resize-only repaint survives the suite, so a reviewer probe confirmed the shipped handler repaints on every resize and centers in the latest window. DRIFT-003 compatibility re-confirmed byte-for-byte and it remains `Verified` under rule 6. |
