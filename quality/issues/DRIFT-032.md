@@ -6,9 +6,8 @@ Tracker: [`TRACKER.md`](../TRACKER.md)
 **Reported:** 2026-07-25; Claude, during independent review of
 [DRIFT-001](DRIFT-001.md); assigned a permanent ID by Codex
 **Initial severity:** Low
-**Primary locations:** `drift.c:1294` (`LaunchClaudeIn` resolution failure),
-`drift.c:2822`, `drift.c:2824`, and `drift.c:2891` (callers returning directly
-to the main loop)
+**Primary locations:** `drift.c:LaunchClaudeIn` (resolution failure),
+`drift.c:HandleInput` (callers returning directly to the main loop)
 **Implemented by:** —
 **Reviewed by:** —
 **Decision owner:** User unless explicitly delegated
@@ -31,10 +30,11 @@ unsafe executable searches. It does not invalidate DRIFT-001's security fix and
 must not be addressed by falling back to bare `cmd` or `claude` lookup.
 
 **Evidence:** Claude identified the control flow during independent review of
-DRIFT-001 and recorded it in that issue's Round 1 findings. At `drift.c:1294`,
-either resolver or process-spec failure returns `1` immediately. The launch
-callers propagate that return into the normal input loop without setting a
-status banner or entering a notification path.
+DRIFT-001 and recorded it in that issue's Round 1 findings. In
+`LaunchClaudeIn`, either resolver or process-spec failure returns `1`
+immediately. The `HandleInput` launch callers propagate that return into the
+normal input loop without setting a status banner or entering a notification
+path.
 
 **Open questions:**
 

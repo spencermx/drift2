@@ -62,35 +62,35 @@ can discover the complete commit set without the user supplying hashes.
 
 | ID | Severity | Status | Finding | Primary location | Implemented by | Reviewed by | Decision / fix |
 |---|---|---|---|---|---|---|---|
-| [DRIFT-001](issues/DRIFT-001.md) | High | Verified | Claude launch can execute planted `cmd.exe` or `claude.*` | `drift.c:1163`, `drift.c:1269` | Codex | Claude: approved with residual risk | Fixed in `a9e75bd`; residual risk carried to DRIFT-031 |
-| [DRIFT-002](issues/DRIFT-002.md) | High | Verified | Vim lookup can execute a planted `vim.exe` | `drift.c:1242`, `drift.c:3192` | Codex | Claude: approved | Fixed in `e1070d2` with shared absolute-`PATH` resolution; DRIFT-001 compatibility re-verified |
-| DRIFT-003 | Medium | Untriaged | Name metadata can be replaced by a truncated file | `drift.c:998` | — | — | — |
-| DRIFT-004 | Medium | Untriaged | Settings JSON scanner can edit the wrong object | `drift.c:1908`, `drift.c:2156` | — | — | — |
-| DRIFT-005 | Medium | Untriaged | Concurrent workspace member changes can be overwritten | `drift.c:1965`, `drift.c:2075` | — | — | — |
-| DRIFT-006 | Medium | Untriaged | Relative `additionalDirectories` resolve against the wrong location | `drift.c:1965`, `drift.c:2221` | — | — | — |
-| DRIFT-007 | Medium | Untriaged | Session-delete confirmation remains armed invisibly after resize | `drift.c:1632` | — | — | — |
-| DRIFT-008 | Medium | Untriaged | Workspace rename can truncate an unchanged long name | `drift.c:1523` | — | — | — |
-| DRIFT-009 | Medium | Untriaged | Session rename can persist malformed UTF-8 | `drift.c:1403` | — | — | — |
-| DRIFT-010 | Medium | Untriaged | The 256-session limit can omit the newest sessions | `drift.c:1218` | — | — | — |
-| DRIFT-011 | Medium | Untriaged | Documented bare `drift` invocation bypasses `drift.bat` | `README.md:29`, `drift.bat:1` | — | — | — |
-| DRIFT-012 | Medium | Untriaged | Default-application launches use the wrong working directory | `drift.c:3027` | — | — | — |
-| DRIFT-013 | Medium | Untriaged | Last-directory handoff is stale and cross-instance unsafe | `drift.c:4033`, `drift.bat:2` | — | — | — |
-| DRIFT-014 | Low | Untriaged | Quick-add remains invisibly active after resize | `drift.c:2379` | — | — | — |
-| DRIFT-015 | Low | Untriaged | Session discovery commits to the first merely existing path encoding | `drift.c:1196` | — | — | — |
-| DRIFT-016 | Low | Untriaged | Failed session scans can be cached as valid | `drift.c:1182` | — | — | — |
-| DRIFT-017 | Low | Untriaged | Workspace preview decodes session titles as ANSI | `drift.c:2520` | — | — | — |
-| DRIFT-018 | Low | Untriaged | Transcript-title truncation can split UTF-8 | `drift.c:1743` | — | — | — |
-| DRIFT-019 | Low | Untriaged | Name-entry fields reject all non-ASCII input | `drift.c:1487`, `drift.c:3713` | — | — | — |
-| DRIFT-020 | Low | Untriaged | Shrinking a name popup leaves an invisible accepted suffix | `drift.c:1424` | — | — | — |
-| DRIFT-021 | Low | Untriaged | Manifest-focused input ignores key modifiers | `drift.c:2732` | — | — | — |
-| DRIFT-022 | Low | Untriaged | Quick-add exposes only the first nine workspaces | `drift.c:2367` | — | — | — |
-| DRIFT-023 | Low | Untriaged | Quick-add success banner is immediately overwritten | `drift.c:2451` | — | — | — |
-| DRIFT-024 | Low | Untriaged | Wine handoff loses browser and session context | `run.sh:50` | — | — | — |
-| DRIFT-025 | Low | Untriaged | Partial delete retains marks for already recycled sources | `drift.c:3445` | — | — | — |
-| DRIFT-026 | Low | Untriaged | Failed navigation is rendered as an empty directory | `drift.c:3182`, `drift.c:3248` | — | — | — |
-| DRIFT-027 | Low | Untriaged | Workspace directory helpers report success after creation failure | `drift.c:959` | — | — | — |
-| DRIFT-028 | Low | Untriaged | Create accepts trailing periods/spaces that Win32 normalizes | `drift.c:3781` | — | — | — |
-| DRIFT-029 | Low | Untriaged | Path identity is case- and separator-sensitive | `drift.c:3335`, `drift.c:4210` | — | — | — |
-| DRIFT-030 | Low | Untriaged | Wine launch-file short writes are treated as success | `drift.c:1103` | — | — | — |
-| [DRIFT-031](issues/DRIFT-031.md) | Low | Untriaged | A `.cmd` launcher shim resolves bare commands from the workspace anchor | `drift.c:1250`, `drift.c:1306` | — | — | Found reviewing DRIFT-001; residual of the same threat class |
-| [DRIFT-032](issues/DRIFT-032.md) | Low | Untriaged | Failure to resolve a safe Claude launcher produces no visible error | `drift.c:1294`, `drift.c:2822` | — | — | Found reviewing DRIFT-001; preserved as an independent UX regression |
+| [DRIFT-001](issues/DRIFT-001.md) | High | Verified | Claude launch can execute planted `cmd.exe` or `claude.*` | `drift.c:ResolveClaudeLauncherFromPath`, `drift.c:LaunchClaudeIn` | Codex | Claude: approved with residual risk | Fixed in `a9e75bd`; residual risk carried to DRIFT-031 |
+| [DRIFT-002](issues/DRIFT-002.md) | High | Verified | Vim lookup can execute a planted `vim.exe` | `drift.c:ResolveVim`, `drift.c:OpenFileInEditor` | Codex | Claude: approved | Fixed in `e1070d2` with shared absolute-`PATH` resolution; DRIFT-001 compatibility re-verified |
+| DRIFT-003 | Medium | Untriaged | Name metadata can be replaced by a truncated file | `drift.c:SetNameEntry` | — | — | — |
+| DRIFT-004 | Medium | Untriaged | Settings JSON scanner can edit the wrong object | `drift.c:FindArraySpan`, `drift.c:SaveMembersTo` | — | — | — |
+| DRIFT-005 | Medium | Untriaged | Concurrent workspace member changes can be overwritten | `drift.c:LoadMembersFrom`, `drift.c:SaveMembersTo` | — | — | — |
+| DRIFT-006 | Medium | Untriaged | Relative `additionalDirectories` resolve against the wrong location | `drift.c:LoadMembersFrom`, `drift.c:FindMember` | — | — | — |
+| DRIFT-007 | Medium | Untriaged | Session-delete confirmation remains armed invisibly after resize | `drift.c:HandleDeleteSession` | — | — | — |
+| DRIFT-008 | Medium | Untriaged | Workspace rename can truncate an unchanged long name | `drift.c:HandleRenameWorkspace` | — | — | — |
+| DRIFT-009 | Medium | Untriaged | Session rename can persist malformed UTF-8 | `drift.c:HandleRenameSession` | — | — | — |
+| DRIFT-010 | Medium | Untriaged | The 256-session limit can omit the newest sessions | `drift.c:LoadSessionsFor` | — | — | — |
+| DRIFT-011 | Medium | Untriaged | Documented bare `drift` invocation bypasses `drift.bat` | `README.md:Install`, `drift.bat` | — | — | — |
+| DRIFT-012 | Medium | Untriaged | Default-application launches use the wrong working directory | `drift.c:OpenFileInEditor` | — | — | — |
+| DRIFT-013 | Medium | Untriaged | Last-directory handoff is stale and cross-instance unsafe | `drift.c:Cleanup`, `drift.bat` | — | — | — |
+| DRIFT-014 | Low | Untriaged | Quick-add remains invisibly active after resize | `drift.c:HandleQuickAdd` | — | — | — |
+| DRIFT-015 | Low | Untriaged | Session discovery commits to the first merely existing path encoding | `drift.c:LoadSessionsFor` | — | — | — |
+| DRIFT-016 | Low | Untriaged | Failed session scans can be cached as valid | `drift.c:LoadSessionsFor` | — | — | — |
+| DRIFT-017 | Low | Untriaged | Workspace preview decodes session titles as ANSI | `drift.c:DrawClaudeInfoPane` | — | — | — |
+| DRIFT-018 | Low | Untriaged | Transcript-title truncation can split UTF-8 | `drift.c:ReadSessionName` | — | — | — |
+| DRIFT-019 | Low | Untriaged | Name-entry fields reject all non-ASCII input | `drift.c:HandleRenameSession`, `drift.c:HandleCreate` | — | — | — |
+| DRIFT-020 | Low | Untriaged | Shrinking a name popup leaves an invisible accepted suffix | `drift.c:HandleRenameSession` | — | — | — |
+| DRIFT-021 | Low | Untriaged | Manifest-focused input ignores key modifiers | `drift.c:HandleInput` | — | — | — |
+| DRIFT-022 | Low | Untriaged | Quick-add exposes only the first nine workspaces | `drift.c:HandleQuickAdd` | — | — | — |
+| DRIFT-023 | Low | Untriaged | Quick-add success banner is immediately overwritten | `drift.c:HandleQuickAdd` | — | — | — |
+| DRIFT-024 | Low | Untriaged | Wine handoff loses browser and session context | `run.sh:Claude launch handoff` | — | — | — |
+| DRIFT-025 | Low | Untriaged | Partial delete retains marks for already recycled sources | `drift.c:ConfirmDelete` | — | — | — |
+| DRIFT-026 | Low | Untriaged | Failed navigation is rendered as an empty directory | `drift.c:ChangeCurrentDirectory`, `drift.c:GetFilesInDirectory` | — | — | — |
+| DRIFT-027 | Low | Untriaged | Workspace directory helpers report success after creation failure | `drift.c:GetDriftDir`, `drift.c:GetWorkspacesRoot` | — | — | — |
+| DRIFT-028 | Low | Untriaged | Create accepts trailing periods/spaces that Win32 normalizes | `drift.c:HandleCreate` | — | — | — |
+| DRIFT-029 | Low | Untriaged | Path identity is case- and separator-sensitive | `drift.c:SaveDirectoryState`, `drift.c:MarkDirEqualToCurrentDir` | — | — | — |
+| DRIFT-030 | Low | Untriaged | Wine launch-file short writes are treated as success | `drift.c:LaunchClaudeIn` | — | — | — |
+| [DRIFT-031](issues/DRIFT-031.md) | Low | Untriaged | A `.cmd` launcher shim resolves bare commands from the workspace anchor | `drift.c:BuildClaudeProcessSpec`, `drift.c:LaunchClaudeIn` | — | — | Found reviewing DRIFT-001; residual of the same threat class |
+| [DRIFT-032](issues/DRIFT-032.md) | Low | Untriaged | Failure to resolve a safe Claude launcher produces no visible error | `drift.c:LaunchClaudeIn`, `drift.c:HandleInput` | — | — | Found reviewing DRIFT-001; preserved as an independent UX regression |

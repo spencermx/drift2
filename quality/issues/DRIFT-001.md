@@ -6,7 +6,9 @@ Tracker: [`TRACKER.md`](../TRACKER.md)
 **Reported:** 2026-07-25
 **Initial severity:** High
 **Final severity:** High
-**Primary locations:** `drift.c:1163`, `drift.c:1217`, `drift.c:1269`
+**Primary locations:** `drift.c:ResolveAllowedFileFromPath`,
+`drift.c:ResolveClaudeLauncherFromPath`, `drift.c:BuildClaudeProcessSpec`,
+`drift.c:LaunchClaudeIn`
 **Implemented by:** Codex
 **Reviewed by:** Claude: approved with residual risk
 **Decision owner:** User unless explicitly delegated
@@ -72,14 +74,18 @@ without changing Claude's inherited command-resolution behavior:
 
 ## Production and test locations
 
-- `drift.c:152` — typed launcher and process-spec records.
-- `drift.c:1110` — absolute-path classification and directory probing.
-- `drift.c:1163` — safe `PATH` parsing and resolution.
-- `drift.c:1217` — direct `.exe` and trusted `.cmd` process construction.
-- `drift.c:1269` — `LaunchClaudeIn` integration.
-- `tests/claude_launcher_test.c:1` — production-linked resolver and real
+- `drift.c:ClaudeLauncher` and `drift.c:ClaudeProcessSpec` — typed launcher and
+  process-spec records.
+- `drift.c:IsAbsolutePathEntry` and `drift.c:ResolveAllowedFileFromPath` —
+  absolute-path classification, directory probing, and safe `PATH` parsing.
+- `drift.c:ResolveClaudeLauncherFromPath` — Claude-specific filename ordering
+  and launcher-kind mapping.
+- `drift.c:BuildClaudeProcessSpec` — direct `.exe` and trusted `.cmd` process
+  construction.
+- `drift.c:LaunchClaudeIn` — production launch integration.
+- `tests/claude_launcher_test.c` — production-linked resolver and real
   child-process regression coverage.
-- `tests/run_tests.bat:65` — Windows regression-suite integration.
+- `tests/run_tests.bat` — Windows regression-suite integration.
 
 ## Acceptance criteria and implementer evidence
 
@@ -270,3 +276,16 @@ identical, `.exe`-before-`.cmd` ordering survives as the `names[]` index-0/1 to
 `EXE`/`CMD` mapping, and the wrappers restore the exact pre-refactor
 initialization of `out->path` and `out->kind`. Nothing in that refactor reopens
 this item.
+
+## Record maintenance
+
+**2026-07-25 — Codex; documentation only.** The commit adding this section is
+an additive audit-linkage bridge carrying both `Audit-ID: DRIFT-001` and
+`Audit-ID: DRIFT-002`. Its message identifies immutable commit `e1070d2` as the
+shared-code refactor and `58c0c1d` as the review record that first documented
+the coupling. A standard DRIFT-001 audit-ID search now finds this bridge and is
+therefore led to both commits without amending either reviewed commit.
+
+This maintenance also replaces moving line numbers in current location fields
+with stable source symbols. It changes no production code, tests, status,
+verdict, implementer attribution, or reviewer-authored finding.

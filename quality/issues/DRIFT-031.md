@@ -6,9 +6,8 @@ Tracker: [`TRACKER.md`](../TRACKER.md)
 **Reported:** 2026-07-25; Claude, during independent review of
 [DRIFT-001](DRIFT-001.md)
 **Initial severity:** Low
-**Primary locations:** `drift.c:1250` (`BuildClaudeProcessSpec`, `.cmd` branch),
-`drift.c:1306` (`LaunchClaudeIn` passing `anchor` as the child working
-directory)
+**Primary locations:** `drift.c:BuildClaudeProcessSpec` (`.cmd` branch),
+`drift.c:LaunchClaudeIn` (`anchor` passed as the child working directory)
 **Implemented by:** —
 **Reviewed by:** —
 **Decision owner:** User unless explicitly delegated

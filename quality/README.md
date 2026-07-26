@@ -57,7 +57,13 @@ the implementer to approve its own work.
    production code until the item is accepted and marked `Fix planned`.
 5. Normally only one item may be `Investigating` or `Fixing` at a time.
 6. Each accepted bug is fixed in isolated commits carrying its audit ID. Do not
-   mix unrelated cleanup, formatting, refactoring, or another bug into them.
+   mix unrelated cleanup, formatting, refactoring, or another bug into them. If
+   an approved fix must materially change production code or regression tests
+   governed by another issue, record that coupling, repeat `Audit-ID:` once for
+   every affected issue, and require the review to check each affected contract.
+   A previously `Verified` affected item returns to `Awaiting review` until an
+   eligible reviewer confirms compatibility; it may then return directly to
+   `Verified` when its accepted behavior did not change.
 7. Add regression coverage that would fail against the pre-fix behavior when
    practical. Explain explicitly when that is not practical.
 8. Tests passing is not independent approval. A different reviewer must inspect
@@ -67,7 +73,10 @@ the implementer to approve its own work.
 10. Keep `TRACKER.md` compact. Never put long-form evidence, analysis, design,
     or history there; put it in the bug's `issues/DRIFT-NNN.md` file.
 11. Keep the tracker and individual bug files accurate as part of the work; do
-    not rely on conversation history as the only record.
+    not rely on conversation history as the only record. Prefer stable
+    `file:function` or `file:section` locations in the living tracker; raw line
+    numbers belong in dated evidence and review rounds where their commit is
+    known.
 12. Attribute implementation to every human or AI system that changes
     production code or regression tests for the item. Never replace an earlier
     implementer when another contributor makes a follow-up change.
@@ -88,10 +97,28 @@ stable name must remain easy to filter.
   example `Claude: changes requested` or `Codex: approved`.
 - Both fields are cumulative. If Claude revises a Codex fix, both are
   implementers and neither may independently approve the final combined fix.
-- Every implementation commit carries both `Audit-ID: DRIFT-NNN` and
-  `Implemented-by: <stable identity>` trailers. An approval-recording commit may
-  carry `Reviewed-by: <stable identity>` only after that verdict actually
-  exists.
+- `Audit-ID: DRIFT-NNN` is a repeatable association trailer. Every
+  implementation commit carries it for the item being fixed, and a shared-code
+  change repeats it for every other issue whose production code or regression
+  contract is materially changed. Multiple IDs document unavoidable coupling;
+  they must not be used to bundle independently fixable work.
+- `Implemented-by: <stable identity>` is required when production code or
+  regression tests change. Documentation-only reporting, investigation,
+  review, or audit-linkage maintenance must not use it.
+- `Reviewed-by: <stable identity>` is allowed only after that reviewer has
+  actually issued the recorded verdict.
+- `Reported-by: <stable identity>` and `Investigated-by: <stable identity>` are
+  optional provenance trailers for documentation-only report and investigation
+  commits. They do not make that identity an implementer or reviewer. These
+  five names are the quality workflow's standard attribution vocabulary; do
+  not invent synonyms. Ordinary Git metadata such as `Co-Authored-By:` is
+  outside this role taxonomy and may still be used.
+
+If an already reviewed immutable commit is later found to be missing an
+affected audit ID, do not amend it. Add a documentation-only bridge commit that
+repeats every affected `Audit-ID:` and explicitly names the immutable commit and
+the coupling. The ordinary audit-ID search will then find the bridge and lead a
+reviewer to the otherwise undiscoverable change.
 
 ## Status model
 
@@ -217,9 +244,10 @@ Implemented-by: Codex
 ```
 
 Every follow-up that changes the same fix must also carry
-`Audit-ID: DRIFT-NNN` and its actual implementer's `Implemented-by` trailer. Do
-not use `Reviewed-by` or similar approval trailers until that review actually
-occurred.
+`Audit-ID: DRIFT-NNN` and, when it changes production code or regression tests,
+its actual implementer's `Implemented-by` trailer. Repeat `Audit-ID:` for any
+other materially affected issue as described above. Do not use `Reviewed-by`
+or similar approval trailers until that review actually occurred.
 
 ## 4. Required review record
 
