@@ -49,8 +49,8 @@
 //              workspace picked from a popup
 // - Enter/L  : (session list) resume the session in claude, anchored in the
 //              workspace; N starts a new session (works from the workspace
-//              list too). claude is spawned via "cmd /c claude" so both a
-//              native exe and the npm .cmd shim resolve.
+//              list too). An absolute launcher is resolved from PATH; native
+//              executables run directly and npm .cmd shims use System32 cmd.
 // - R / D    : (session list) rename the session's drift display name
 //              (stored in .drift\session-names, claude files untouched)
 //              / delete the session transcript (recycle bin, confirmed)
@@ -149,6 +149,20 @@ typedef struct {
     int index;
     int distance;
 } DistanceEntry;
+enum ClaudeLauncherKind {
+    CLAUDE_LAUNCHER_NONE,
+    CLAUDE_LAUNCHER_EXE,
+    CLAUDE_LAUNCHER_CMD
+};
+typedef struct {
+    char path[MAX_PATH];
+    enum ClaudeLauncherKind kind;
+} ClaudeLauncher;
+#define CLAUDE_COMMAND_CAP (MAX_PATH * 2 + 128)
+typedef struct {
+    char application[MAX_PATH];
+    char command[CLAUDE_COMMAND_CAP];
+} ClaudeProcessSpec;
 // =========================== Types and Constants ===========================
 
 // =========================== Function Declarations =========================
@@ -195,6 +209,10 @@ void EnsureWorkspaceNotes(const char* anchor);
 void EnterAnchorMode();
 void ExitAnchorMode();
 void HandleQuickAdd();
+bool ResolveClaudeLauncherFromPath(const char* path_value, ClaudeLauncher* out);
+bool ResolveClaudeLauncher(ClaudeLauncher* out);
+bool BuildClaudeProcessSpec(const ClaudeLauncher* launcher, const char* session_id,
+                            ClaudeProcessSpec* out);
 int LaunchClaudeIn(const char* anchor, const char* session_id);
 void ScrollOriginalScreen();
 bool IsSafeSessionId(const char* id);
@@ -1089,9 +1107,163 @@ void ScrollOriginalScreen() {
     }
 }
 
-// Suspend the TUI, run claude anchored in the workspace, resume when it
-// exits. Spawned through cmd so PATH resolution finds a native claude.exe
-// and the npm claude.cmd shim alike. session_id NULL starts a new session.
+static bool IsPathSlash(char c) {
+    return c == '\\' || c == '/';
+}
+
+// Deliberately narrower than GetFullPathName: that API turns relative input
+// into an absolute path using the process cwd, which is precisely the search
+// location this resolver must exclude. Drive-rooted and UNC/device paths are
+// self-contained; drive-relative (C:dir) and root-relative (\dir) paths are not.
+static bool IsAbsolutePathEntry(const char* path, size_t len) {
+    bool drive_rooted = len >= 3 &&
+        ((path[0] >= 'A' && path[0] <= 'Z') ||
+         (path[0] >= 'a' && path[0] <= 'z')) &&
+        path[1] == ':' && IsPathSlash(path[2]);
+    bool unc_or_device = len >= 3 && IsPathSlash(path[0]) &&
+        IsPathSlash(path[1]) && !IsPathSlash(path[2]);
+    return drive_rooted || unc_or_device;
+}
+
+static bool FindClaudeInPathEntry(const char* entry, size_t len,
+                                  ClaudeLauncher* out) {
+    if (!IsAbsolutePathEntry(entry, len) || len >= MAX_PATH) return false;
+
+    char dir[MAX_PATH];
+    memcpy(dir, entry, len);
+    dir[len] = '\0';
+    for (size_t i = 0; i < len; i++) {
+        if (dir[i] == '"') return false;
+    }
+
+    const char* names[] = { "claude.exe", "claude.cmd" };
+    enum ClaudeLauncherKind kinds[] = {
+        CLAUDE_LAUNCHER_EXE, CLAUDE_LAUNCHER_CMD
+    };
+    const char* separator = len > 0 && IsPathSlash(dir[len - 1]) ? "" : "\\";
+    for (int i = 0; i < 2; i++) {
+        char candidate[MAX_PATH];
+        int written = snprintf(candidate, sizeof(candidate), "%s%s%s",
+                               dir, separator, names[i]);
+        if (written < 0 || written >= (int)sizeof(candidate)) continue;
+        DWORD attributes = GetFileAttributes(candidate);
+        if (attributes != INVALID_FILE_ATTRIBUTES &&
+            !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            strcpy(out->path, candidate);
+            out->kind = kinds[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+// Resolve only from explicit, fully-qualified PATH entries. Empty and relative
+// entries have current-directory semantics in Windows command search and must
+// never be allowed to reintroduce the workspace as an executable source.
+bool ResolveClaudeLauncherFromPath(const char* path_value, ClaudeLauncher* out) {
+    out->path[0] = '\0';
+    out->kind = CLAUDE_LAUNCHER_NONE;
+    if (path_value == NULL) return false;
+
+    const char* start = path_value;
+    while (true) {
+        const char* end = start;
+        bool in_quotes = false;
+        while (*end != '\0') {
+            if (*end == '"') {
+                in_quotes = !in_quotes;
+            } else if (*end == ';' && !in_quotes) {
+                break;
+            }
+            end++;
+        }
+
+        while (start < end && (*start == ' ' || *start == '\t')) start++;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        if (end - start >= 2 && start[0] == '"' && end[-1] == '"') {
+            start++;
+            end--;
+        }
+        if (FindClaudeInPathEntry(start, (size_t)(end - start), out)) {
+            return true;
+        }
+
+        if (*end == '\0') break;
+        // end can point before the actual separator after whitespace trimming;
+        // resume from the separator found by the scan, not the trimmed end.
+        const char* separator = end;
+        while (*separator != '\0' && *separator != ';') separator++;
+        if (*separator == '\0') break;
+        start = separator + 1;
+    }
+    return false;
+}
+
+bool ResolveClaudeLauncher(ClaudeLauncher* out) {
+    out->path[0] = '\0';
+    out->kind = CLAUDE_LAUNCHER_NONE;
+    DWORD required = GetEnvironmentVariable("PATH", NULL, 0);
+    if (required == 0) return false;
+
+    char* path_value = (char*)malloc(required);
+    if (path_value == NULL) return false;
+    DWORD length = GetEnvironmentVariable("PATH", path_value, required);
+    bool found = length > 0 && length < required &&
+        ResolveClaudeLauncherFromPath(path_value, out);
+    free(path_value);
+    return found;
+}
+
+bool BuildClaudeProcessSpec(const ClaudeLauncher* launcher, const char* session_id,
+                            ClaudeProcessSpec* out) {
+    out->application[0] = '\0';
+    out->command[0] = '\0';
+    if (launcher == NULL || launcher->path[0] == '\0' ||
+        (session_id != NULL && !IsSafeSessionId(session_id))) {
+        return false;
+    }
+
+    int written;
+    if (launcher->kind == CLAUDE_LAUNCHER_EXE) {
+        strcpy(out->application, launcher->path);
+        written = session_id != NULL
+            ? snprintf(out->command, sizeof(out->command),
+                       "\"%s\" --resume \"%s\"", launcher->path, session_id)
+            : snprintf(out->command, sizeof(out->command),
+                       "\"%s\"", launcher->path);
+    } else if (launcher->kind == CLAUDE_LAUNCHER_CMD) {
+        // Percent expansion happens even inside cmd's double quotes. Reject a
+        // launcher path containing '%' rather than let its absolute spelling
+        // be rewritten into another command. /d disables AutoRun registry
+        // hooks and /v:off prevents delayed !variable! expansion.
+        if (strchr(launcher->path, '%') != NULL) return false;
+        char system_dir[MAX_PATH];
+        DWORD length = GetSystemDirectory(system_dir, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH) return false;
+        written = snprintf(out->application, sizeof(out->application),
+                           "%s\\cmd.exe", system_dir);
+        if (written < 0 || written >= (int)sizeof(out->application)) return false;
+        DWORD attributes = GetFileAttributes(out->application);
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_DIRECTORY)) return false;
+
+        written = session_id != NULL
+            ? snprintf(out->command, sizeof(out->command),
+                       "\"%s\" /d /v:off /s /c \"\"%s\" --resume \"%s\"\"",
+                       out->application, launcher->path, session_id)
+            : snprintf(out->command, sizeof(out->command),
+                       "\"%s\" /d /v:off /s /c \"\"%s\"\"",
+                       out->application, launcher->path);
+    } else {
+        return false;
+    }
+    return written >= 0 && written < (int)sizeof(out->command);
+}
+
+// Suspend the TUI, run claude anchored in the workspace, resume when it exits.
+// Native launch first resolves an absolute executable from absolute PATH
+// entries, so neither Drift's launch directory nor the workspace participates
+// implicitly. session_id NULL starts a new session.
 // Returns 0 when drift should exit because a wrapper script is taking over
 // the launch (see below).
 int LaunchClaudeIn(const char* anchor, const char* session_id) {
@@ -1117,13 +1289,10 @@ int LaunchClaudeIn(const char* anchor, const char* session_id) {
         return 1;
     }
 
-    // Quote the id: cmd only honors '&' and friends *outside* double quotes,
-    // and '"' itself cannot occur in a filename, so the id cannot break back out
-    char command[MAX_PATH + 64];
-    int written = (session_id != NULL)
-        ? snprintf(command, sizeof(command), "cmd /c claude --resume \"%s\"", session_id)
-        : snprintf(command, sizeof(command), "cmd /c claude");
-    if (written < 0 || written >= (int)sizeof(command)) {
+    ClaudeLauncher launcher;
+    ClaudeProcessSpec process;
+    if (!ResolveClaudeLauncher(&launcher) ||
+        !BuildClaudeProcessSpec(&launcher, session_id, &process)) {
         return 1;
     }
 
@@ -1134,7 +1303,8 @@ int LaunchClaudeIn(const char* anchor, const char* session_id) {
     STARTUPINFO si = {0};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi;
-    if (CreateProcess(NULL, command, NULL, NULL, FALSE, 0, NULL, anchor, &si, &pi)) {
+    if (CreateProcess(process.application, process.command, NULL, NULL, FALSE, 0,
+                      NULL, anchor, &si, &pi)) {
         WaitForSingleObject(pi.hProcess, INFINITE);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
