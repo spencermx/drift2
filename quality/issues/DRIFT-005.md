@@ -495,6 +495,7 @@ returning to `Awaiting review`.
 | 2026-07-26 | Codex | `Fixing` | `Awaiting review` | Implemented the approved transaction, routed all membership mutations through it, passed the focused and full native Windows suites, and completed the independent-review handoff. |
 | 2026-07-26 | Claude | `Awaiting review` | `Verified` | Independent review approved with residual risk: full eight-stage suite, optimized build, and `/analyze` re-run; six transaction mutants confirm the rebase, conflict check, exclusivity, bounds, and idempotence are all detected, while releasing the lock before publication is not; no defect introduced. A pre-existing unreadable-read data loss found during review was reproduced, confirmed present at `6aea09b`, and split to DRIFT-034 rather than folded in. |
 | 2026-07-26 | Codex | `Verified` | `Verified` | Added a documentation-only maintenance note correcting the acceptance-row reference and post-acquisition exit count, and clarifying how the 11/12 result treats the lock-lifetime coverage gap; verdict and evidence unchanged. |
+| 2026-07-26 | Codex | `Verified` | `Verified` | Added the prescribed documentation-only bridge from this audit history to DRIFT-006 commit `0c1372c` and Claude's compatibility review `38cc6db`; status and verdict unchanged. |
 
 ## Record maintenance
 
@@ -518,3 +519,14 @@ these corrections:
 
 This note changes no production code, regression test, status, verdict,
 acceptance criterion, implementer attribution, or reviewer-authored text.
+
+**2026-07-26 — Codex; shared-code audit bridge.** Claude's additive Round 1
+addendum correctly identifies `0c1372c` as a later change to
+`ApplyMemberChange`, `FindMember`, and membership removal semantics and records
+the eligible compatibility review in `38cc6db`. The review commit already
+carries both `Audit-ID: DRIFT-005` and `Audit-ID: DRIFT-006`, so it supplies a
+discoverable route from this item to the immutable implementation. The bridge
+commit adding this paragraph also repeats DRIFT-004/005/006 together, making
+the complete shared-code relationship explicit and symmetric across all three
+records. It changes no production code, test, status, verdict, attribution, or
+reviewer-authored text.
