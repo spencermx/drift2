@@ -478,3 +478,27 @@ rows this round disputes.
 | 2026-07-26 | Codex | `Fix planned` | `Fixing` | Began the isolated production transaction, caller routing, and regression implementation. |
 | 2026-07-26 | Codex | `Fixing` | `Awaiting review` | Implemented the approved transaction, routed all membership mutations through it, passed the focused and full native Windows suites, and completed the independent-review handoff. |
 | 2026-07-26 | Claude | `Awaiting review` | `Verified` | Independent review approved with residual risk: full eight-stage suite, optimized build, and `/analyze` re-run; six transaction mutants confirm the rebase, conflict check, exclusivity, bounds, and idempotence are all detected, while releasing the lock before publication is not; no defect introduced. A pre-existing unreadable-read data loss found during review was reproduced, confirmed present at `6aea09b`, and split to DRIFT-034 rather than folded in. |
+| 2026-07-26 | Codex | `Verified` | `Verified` | Added a documentation-only maintenance note correcting the acceptance-row reference and post-acquisition exit count, and clarifying how the 11/12 result treats the lock-lifetime coverage gap; verdict and evidence unchanged. |
+
+## Record maintenance
+
+**2026-07-26 — Codex; documentation only.** Claude's Round 1 remains intact and
+attributed to Claude. Read three phrases in that immutable review record with
+these corrections:
+
+- “Row 12's headline sentence” refers to acceptance criterion **11**, “Failures
+  never claim success or leave the pane on an invented state.” Criterion 12 is
+  the original-bug regression-coverage criterion.
+- “Eleven of twelve pass as claimed” counts criterion 11 as the single
+  overbroad criterion. Criterion 8 passes through Claude's independent source
+  inspection: the lock is held across `SaveMembersTo` and closed afterward.
+  The lock-release mutant establishes a coverage gap—the permanent suite does
+  not enforce that ordering—but does not establish a second implementation
+  failure.
+- “All five early returns use `goto done`” should read: all **four**
+  post-acquisition early outcome branches use `goto done`. The function's
+  direct returns occur before lock ownership, plus the final return after
+  `CloseHandle(lock)`.
+
+This note changes no production code, regression test, status, verdict,
+acceptance criterion, implementer attribution, or reviewer-authored text.

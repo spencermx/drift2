@@ -18,6 +18,12 @@ antivirus, a backup agent, or Claude itself holding the file — and the conditi
 clears before `SaveMembersTo` re-reads a few milliseconds later. No concurrent
 Drift process is required.
 
+**Trigger clarification — 2026-07-26, Codex:** The destructive publication also
+requires an add operation while the transaction sees the failed read as an
+empty list. A removal against that apparent empty list returns
+`MEMBER_CHANGE_NO_CHANGE` and does not call `SaveMembersTo`. This narrows the
+minimal trigger without changing the reported root cause, impact, or severity.
+
 **Impact:** The membership transaction publishes a list built from zero members
 and returns `MEMBER_CHANGE_SAVED`. Every folder previously granted to that
 workspace is silently removed from `permissions.additionalDirectories`, and the
@@ -98,3 +104,4 @@ structural targeting once the bytes are in hand.
 | Date | Actor | From | To | Summary |
 |---|---|---|---|---|
 | 2026-07-26 | Claude | — | `Untriaged` | Reported while independently reviewing DRIFT-005; reproduced through production load/save and confirmed pre-existing at `6aea09b`, so it is tracked separately rather than folded into that fix. |
+| 2026-07-26 | Codex | `Untriaged` | `Untriaged` | Clarified that the destructive failed-read path requires an add operation; a removal returns no-change without publication. No investigation or disposition performed. |
