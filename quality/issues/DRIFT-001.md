@@ -252,3 +252,21 @@ separate-valid-concern rule; findings 2 and 3 are accepted as recorded risk. No
 implementer response is required. Per section 6, this round was recorded by the
 reviewer because no implementer was present in the session; no
 implementer-authored section of this file was modified.
+
+**Post-review note — 2026-07-25, Claude.** This item's production code was
+restructured after approval by `e1070d2` "Fix DRIFT-002: resolve Vim only from
+absolute PATH entries". That commit generalized `FindClaudeInPathEntry`,
+`ResolveClaudeLauncherFromPath`, and `ResolveClaudeLauncher` into a shared
+allowlist resolver behind Claude and Vim wrappers. It carries only
+`Audit-ID: DRIFT-002`, so `git log --grep="Audit-ID: DRIFT-001"` does not return
+it; use `git log -L 1163,1200:drift.c` or read DRIFT-002.md to see the current
+shape of this code. Rule 9 forbids amending the reviewed commit, so this note
+rather than a trailer correction is the record.
+
+DRIFT-001 remains `Verified`. While reviewing DRIFT-002 the same reviewer
+confirmed that Claude behavior is unchanged: `tests/claude_launcher_test.c` is
+untouched by that commit, all 17 cases still pass, the tokenizer body is
+identical, `.exe`-before-`.cmd` ordering survives as the `names[]` index-0/1 to
+`EXE`/`CMD` mapping, and the wrappers restore the exact pre-refactor
+initialization of `out->path` and `out->kind`. Nothing in that refactor reopens
+this item.

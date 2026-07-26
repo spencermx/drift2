@@ -63,7 +63,7 @@ can discover the complete commit set without the user supplying hashes.
 | ID | Severity | Status | Finding | Primary location | Implemented by | Reviewed by | Decision / fix |
 |---|---|---|---|---|---|---|---|
 | [DRIFT-001](issues/DRIFT-001.md) | High | Verified | Claude launch can execute planted `cmd.exe` or `claude.*` | `drift.c:1163`, `drift.c:1269` | Codex | Claude: approved with residual risk | Fixed in `a9e75bd`; residual risk carried to DRIFT-031 |
-| [DRIFT-002](issues/DRIFT-002.md) | High | Awaiting review | Vim lookup can execute a planted `vim.exe` | `drift.c:1242`, `drift.c:3192` | Codex | — | Fixed with shared absolute-`PATH` resolution; independent review required |
+| [DRIFT-002](issues/DRIFT-002.md) | High | Verified | Vim lookup can execute a planted `vim.exe` | `drift.c:1242`, `drift.c:3192` | Codex | Claude: approved | Fixed in `e1070d2` with shared absolute-`PATH` resolution; DRIFT-001 compatibility re-verified |
 | DRIFT-003 | Medium | Untriaged | Name metadata can be replaced by a truncated file | `drift.c:998` | — | — | — |
 | DRIFT-004 | Medium | Untriaged | Settings JSON scanner can edit the wrong object | `drift.c:1908`, `drift.c:2156` | — | — | — |
 | DRIFT-005 | Medium | Untriaged | Concurrent workspace member changes can be overwritten | `drift.c:1965`, `drift.c:2075` | — | — | — |
