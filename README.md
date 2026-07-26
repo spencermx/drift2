@@ -182,13 +182,15 @@ workspace. Names live beside it instead.
 └── workspaces\
     └── 2026-07-25_07-02-00\         a workspace — the folder is an opaque id
         ├── .claude\
-        │   └── settings.json        its folders, in additionalDirectories
+        │   └── settings.json        its folders, in permissions.additionalDirectories
         └── CLAUDE.md                yours
 ```
 
-`settings.json` is Claude Code's own file, read natively — drift splices only the
-`additionalDirectories` array, so anything else you put in it survives. Session
-transcripts stay where Claude puts them, in `%USERPROFILE%\.claude\projects`.
+`settings.json` is Claude Code's own file, read natively — drift splices only
+`permissions.additionalDirectories`, so anything else you put in it survives.
+If the JSON or that exact path is malformed, wrongly typed, or ambiguous, drift
+refuses the membership edit and leaves the file alone. Session transcripts stay
+where Claude puts them, in `%USERPROFILE%\.claude\projects`.
 
 ### Environment variables
 

@@ -29,6 +29,8 @@
 #include <string.h>
 #include <wchar.h>
 
+#include "../settings_json.h"
+
 #define MAX_PATH 260
 #define MAX_MEMBERS 128
 #define COLUMN_DIVIDER_POSITION 28
@@ -279,109 +281,140 @@ static void test_remove_member_disjoint(void) {
 }
 
 // ---------------------------------------------------------------------------
-// 4. FindArraySpan key targeting
+// 4. Settings JSON path targeting
 // ---------------------------------------------------------------------------
 
-// Verbatim from drift.c:FindArraySpan.
-static bool FindArraySpan(const char* buf, int* out_start, int* out_end) {
-    const char* KEY = "\"additionalDirectories\"";
-    const size_t key_len = strlen(KEY);
-
-    const char* p = NULL;
-    bool in_string = false;
-    for (const char* c = buf; *c != '\0'; c++) {
-        if (in_string) {
-            if (*c == '\\' && c[1] != '\0') c++;
-            else if (*c == '"') in_string = false;
-            continue;
-        }
-        if (*c != '"') continue;
-        if (strncmp(c, KEY, key_len) != 0) {
-            in_string = true;
-            continue;
-        }
-        const char* v = c + key_len;
-        while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
-        if (*v != ':') {
-            in_string = true;
-            continue;
-        }
-        v++;
-        while (*v == ' ' || *v == '\t' || *v == '\n' || *v == '\r') v++;
-        if (*v != '[') return false;
-        p = v;
-        break;
-    }
-    if (p == NULL) return false;
-
-    const char* q = p + 1;
-    in_string = false;
-    while (*q != '\0') {
-        if (in_string) {
-            if (*q == '\\' && q[1] != '\0') q++;
-            else if (*q == '"') in_string = false;
-        } else {
-            if (*q == '"') in_string = true;
-            else if (*q == ']') {
-                *out_start = (int)(p - buf);
-                *out_end = (int)(q - buf);
-                return true;
-            }
-        }
-        q++;
-    }
-    return false;
-}
-
-// The exact text SaveMembersTo would splice over, so a mis-targeted span shows
-// up as the wrong array rather than merely as a wrong offset
+// Return the exact text SaveMembersTo would splice over. The parser is included
+// from the same header as production rather than copied into this test.
 static bool spliced(const char* json, char* out, size_t out_size) {
-    int s, e;
-    if (!FindArraySpan(json, &s, &e)) return false;
-    size_t n = (size_t)(e - s + 1);
+    DriftSettingsJsonTarget target;
+    if (!DriftLocateSettingsJsonTarget(json, strlen(json), &target) ||
+        target.action != DRIFT_SETTINGS_JSON_REPLACE_ARRAY) return false;
+    size_t n = (size_t)(target.array_end - target.array_start + 1);
     if (n >= out_size) return false;
-    memcpy(out, json + s, n);
+    memcpy(out, json + target.array_start, n);
     out[n] = '\0';
     return true;
 }
 
 static void test_find_array_span(void) {
     char got[256];
-    printf("FindArraySpan key targeting\n");
+    DriftSettingsJsonTarget target;
+    printf("Settings JSON path targeting\n");
 
     report("plain key resolves to its own array",
            spliced("{\"permissions\":{\"additionalDirectories\":[\"a\"]}}",
                    got, sizeof got) && strcmp(got, "[\"a\"]") == 0);
 
     report("whitespace around ':' and '[' is tolerated",
-           spliced("{\"additionalDirectories\"  :\n  [\"a\"]}", got, sizeof got) &&
+           spliced("{\"permissions\":{\"additionalDirectories\"  :\n  [\"a\"]}}",
+                   got, sizeof got) &&
            strcmp(got, "[\"a\"]") == 0);
 
-    // Regression: strstr matched the name used as a value, and strchr then took
-    // permissions.allow's bracket, so the splice overwrote the allow rules
     report("name appearing as a value does not retarget onto allow",
            !spliced("{\"env\":{\"DOC\":\"additionalDirectories\"},"
                     "\"permissions\":{\"allow\":[\"Bash(git:*)\"]}}",
                     got, sizeof got));
 
-    // Regression: a non-array value let strchr walk on to the next array
-    report("non-array value does not retarget onto the next array",
-           !spliced("{\"permissions\":{\"additionalDirectories\":null},"
-                    "\"hooks\":{\"x\":[\"a\"]}}", got, sizeof got));
+    const char* wrong_type =
+        "{\"permissions\":{\"additionalDirectories\":null},"
+        "\"hooks\":{\"x\":[\"a\"]}}";
+    report("non-array value is unsafe rather than treated as missing",
+           !DriftLocateSettingsJsonTarget(wrong_type, strlen(wrong_type), &target));
 
     report("a key merely ending in the name is not matched",
-           spliced("{\"x-additionalDirectories\":[\"no\"],"
-                   "\"additionalDirectories\":[\"yes\"]}", got, sizeof got) &&
+           spliced("{\"permissions\":{\"x-additionalDirectories\":[\"no\"],"
+                   "\"additionalDirectories\":[\"yes\"]}}", got, sizeof got) &&
            strcmp(got, "[\"yes\"]") == 0);
 
     report("an escaped quote in an earlier string does not desync the scan",
            spliced("{\"note\":\"say \\\"additionalDirectories\\\" loudly\","
-                   "\"additionalDirectories\":[\"ok\"]}", got, sizeof got) &&
+                   "\"permissions\":{\"additionalDirectories\":[\"ok\"]}}",
+                   got, sizeof got) &&
            strcmp(got, "[\"ok\"]") == 0);
 
     report("a ']' inside a member string does not end the span early",
-           spliced("{\"additionalDirectories\":[\"a]b\",\"c\"]}", got, sizeof got) &&
+           spliced("{\"permissions\":{\"additionalDirectories\":[\"a]b\",\"c\"]}}",
+                   got, sizeof got) &&
            strcmp(got, "[\"a]b\",\"c\"]") == 0);
+
+    report("a supported plugin option cannot outrank the permissions path",
+           spliced("{\"pluginConfigs\":{\"p@m\":{\"options\":{"
+                   "\"additionalDirectories\":[\"plugin\"]}}},"
+                   "\"permissions\":{\"additionalDirectories\":[\"permission\"]}}",
+                   got, sizeof got) && strcmp(got, "[\"permission\"]") == 0);
+
+    const char* insertion =
+        "{\"companyAnnouncements\":[\"permissions\"],\"env\":{\"KEEP\":\"yes\"},"
+        "\"permissions\":{\"allow\":[]}}";
+    const char* permissions = strstr(insertion, "\"permissions\":{\"allow\"");
+    report("a permissions string cannot retarget insertion into env",
+           permissions != NULL &&
+           DriftLocateSettingsJsonTarget(insertion, strlen(insertion), &target) &&
+           target.action == DRIFT_SETTINGS_JSON_INSERT_IN_PERMISSIONS &&
+           target.insert_at == (int)(strchr(permissions, '{') - insertion) + 1);
+
+    const char* nested =
+        "{\"env\":{\"permissions\":{\"additionalDirectories\":[\"nested\"]}}}";
+    report("nested permissions does not replace a missing root object",
+           DriftLocateSettingsJsonTarget(nested, strlen(nested), &target) &&
+           target.action == DRIFT_SETTINGS_JSON_INSERT_PERMISSIONS &&
+           target.insert_at == 1);
+
+    report("Unicode-escaped semantic target keys are recognized",
+           spliced("{\"permiss\\u0069ons\":{"
+                   "\"additionalDirec\\u0074ories\":[\"ok\"]}}",
+                   got, sizeof got) && strcmp(got, "[\"ok\"]") == 0);
+
+    const char* duplicate =
+        "{\"permissions\":{\"additionalDirectories\":[],"
+        "\"\\u0061dditionalDirectories\":[]}}";
+    report("duplicate semantic target keys fail closed",
+           !DriftLocateSettingsJsonTarget(duplicate, strlen(duplicate), &target));
+
+    const char* malformed = "{\"permissions\":";
+    const char* trailing = "{} trailing";
+    report("malformed and trailing-garbage documents fail closed",
+           !DriftLocateSettingsJsonTarget(malformed, strlen(malformed), &target) &&
+           !DriftLocateSettingsJsonTarget(trailing, strlen(trailing), &target));
+
+    const char* unknown_values =
+        "{\"yes\":true,\"no\":false,\"nothing\":null,"
+        "\"number\":-12.5e+2}";
+    report("valid unknown JSON value types remain editable",
+           DriftLocateSettingsJsonTarget(unknown_values, strlen(unknown_values),
+                                         &target) &&
+           target.action == DRIFT_SETTINGS_JSON_INSERT_PERMISSIONS);
+
+    const char* bad_numbers = "{\"x\":01}";
+    report("invalid JSON number grammar fails closed",
+           !DriftLocateSettingsJsonTarget(bad_numbers, strlen(bad_numbers),
+                                          &target));
+
+    const char* empty_root = "{}";
+    const char* empty_permissions = "{\"permissions\":{}}";
+    report("empty insertion parents require no comma",
+           DriftLocateSettingsJsonTarget(empty_root, strlen(empty_root), &target) &&
+           target.action == DRIFT_SETTINGS_JSON_INSERT_PERMISSIONS &&
+           !target.needs_comma &&
+           DriftLocateSettingsJsonTarget(empty_permissions,
+                                         strlen(empty_permissions), &target) &&
+           target.action == DRIFT_SETTINGS_JSON_INSERT_IN_PERMISSIONS &&
+           !target.needs_comma);
+
+    const char* trailing_commas = "{\"permissions\":{\"allow\":[],}}";
+    report("JSON trailing commas fail closed",
+           !DriftLocateSettingsJsonTarget(trailing_commas,
+                                          strlen(trailing_commas), &target));
+
+    const char* bad_escape = "{\"x\":\"\\q\"}";
+    report("invalid JSON string escapes fail closed",
+           !DriftLocateSettingsJsonTarget(bad_escape, strlen(bad_escape), &target));
+
+    const char bom[] =
+        "\xef\xbb\xbf{\"permissions\":{\"additionalDirectories\":[\"bom\"]}}";
+    report("a UTF-8 BOM is preserved while offsets target the real array",
+           spliced(bom, got, sizeof got) && strcmp(got, "[\"bom\"]") == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -399,8 +432,14 @@ static void parse_members(const char* json) {
     lm_member_count = 0;
     lm_block_reason = NULL;
 
-    int s, e;
-    if (!FindArraySpan(json, &s, &e)) return;
+    DriftSettingsJsonTarget target;
+    if (!DriftLocateSettingsJsonTarget(json, strlen(json), &target)) {
+        lm_block_reason = "(settings.json structure cannot be edited safely)";
+        return;
+    }
+    if (target.action != DRIFT_SETTINGS_JSON_REPLACE_ARRAY) return;
+    int s = target.array_start;
+    int e = target.array_end;
     const char* p = json + s + 1;
     const char* stop = json + e;
     while (p < stop && lm_member_count < MAX_MEMBERS) {
@@ -444,21 +483,23 @@ static void parse_members(const char* json) {
     }
 }
 
-// {"additionalDirectories":["d0","d1",...]} with `count` entries
+// {"permissions":{"additionalDirectories":["d0","d1",...]}} with count entries
 static void build_list(char* buf, size_t cap, int count) {
     size_t n = 0;
-    n += (size_t)snprintf(buf + n, cap - n, "{\"additionalDirectories\":[");
+    n += (size_t)snprintf(buf + n, cap - n,
+                          "{\"permissions\":{\"additionalDirectories\":[");
     for (int i = 0; i < count; i++) {
         n += (size_t)snprintf(buf + n, cap - n, "%s\"d%d\"", i == 0 ? "" : ",", i);
     }
-    snprintf(buf + n, cap - n, "]}");
+    snprintf(buf + n, cap - n, "]}}");
 }
 
 static void test_member_parse_refusals(void) {
     static char buf[16384];
     printf("LoadMembersFrom refuses lossy edits\n");
 
-    parse_members("{\"additionalDirectories\":[\"C:\\\\a\",\"C:\\\\b\"]}");
+    parse_members("{\"permissions\":{\"additionalDirectories\":["
+                  "\"C:\\\\a\",\"C:\\\\b\"]}}");
     report("ordinary entries load and stay editable",
            lm_member_count == 2 && lm_block_reason == NULL &&
            strcmp(lm_members[0], "C:\\a") == 0 &&
@@ -478,23 +519,26 @@ static void test_member_parse_refusals(void) {
 
     // Regression: a path over MAX_PATH was kept as its 259-char prefix and
     // written back over the real entry
-    size_t n = (size_t)snprintf(buf, sizeof buf, "{\"additionalDirectories\":[\"");
+    size_t n = (size_t)snprintf(
+        buf, sizeof buf, "{\"permissions\":{\"additionalDirectories\":[\"");
     for (int i = 0; i < 300; i++) buf[n++] = 'x';
-    snprintf(buf + n, sizeof buf - n, "\"]}");
+    snprintf(buf + n, sizeof buf - n, "\"]}}");
     parse_members(buf);
     report("a path longer than MAX_PATH refuses the edit",
            lm_block_reason != NULL && lm_member_count == 0);
 
     // A path of exactly MAX_PATH-1 fills the buffer without being cut
-    n = (size_t)snprintf(buf, sizeof buf, "{\"additionalDirectories\":[\"");
+    n = (size_t)snprintf(
+        buf, sizeof buf, "{\"permissions\":{\"additionalDirectories\":[\"");
     for (int i = 0; i < MAX_PATH - 1; i++) buf[n++] = 'x';
-    snprintf(buf + n, sizeof buf - n, "\"]}");
+    snprintf(buf + n, sizeof buf - n, "\"]}}");
     parse_members(buf);
     report("a path of exactly MAX_PATH-1 is not treated as truncated",
            lm_member_count == 1 && lm_block_reason == NULL);
 
     // Regression: \u was lowered to '?' and the '?' written back as the path
-    parse_members("{\"additionalDirectories\":[\"C:\\\\Users\\\\jos\\u00e9\"]}");
+    parse_members("{\"permissions\":{\"additionalDirectories\":["
+                  "\"C:\\\\Users\\\\jos\\u00e9\"]}}");
     report("a \\u escape refuses the edit", lm_block_reason != NULL);
 }
 
