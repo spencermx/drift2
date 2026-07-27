@@ -31,7 +31,10 @@ if not defined VSINSTALL (
 )
 
 echo Using Visual Studio at: %VSINSTALL%
-call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" >nul
+REM vcvars is noisy on stderr too (VS 18's VsDevCmd.bat fails to locate
+REM vswhere.exe when NoDefaultCurrentDirectoryInExePath is set). The
+REM `where cl` check below is what actually decides whether it worked.
+call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 where cl >nul 2>&1
 if errorlevel 1 (
     echo Failed to initialize the MSVC build environment.
@@ -40,6 +43,15 @@ if errorlevel 1 (
 
 :build
 if not exist build mkdir build
+
+REM Drop the previous binary first. cl fails before overwriting it, so without
+REM this a failed build leaves a stale drift.exe that looks like a fresh one.
+del build\drift.exe >nul 2>&1
+if exist build\drift.exe (
+    echo Cannot replace build\drift.exe -- is it still running?
+    exit /b 1
+)
+
 echo Building drift.exe...
 cl /nologo /W3 /O2 src\drift.c /Fe:build\drift.exe /Fo:build\drift.obj shell32.lib
 if errorlevel 1 (
