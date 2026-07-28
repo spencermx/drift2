@@ -232,6 +232,18 @@ it treats `settings.json` — that one is Claude's, so drift splices it and
 refuses rather than risk being lossy. This one is drift's own output, and says so
 in its header.
 
+**It tracks `settings.json`, not the last `v`.** Adding or removing a folder —
+with `Space` in edit mode, with `Shift+W`, or from another drift instance —
+rewrites the file straight away, inside the same lock that guards the membership
+change. Renaming the workspace moves it, since the filename is what VS Code
+titles the window with. So the copy in VS Code's Recent list is the current
+folder set, not a snapshot from whenever you last pressed `v`.
+
+drift only ever rewrites or deletes a `.code-workspace` carrying its own
+generated header, so a hand-made one sharing the anchor is left alone. And it
+only maintains a file that already exists: `v` is what creates one, so a
+workspace you never open in VS Code never acquires it.
+
 ### Sessions
 
 ```
