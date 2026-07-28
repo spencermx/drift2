@@ -24,6 +24,13 @@
 // - O        : Show visited directories and jump to selected one
 // - A        : Create new file/directory (append '\' to name for directory)
 // - .        : Toggle showing hidden files (hidden by default)
+// - V        : Open in an editor. A j/k-and-Enter menu offers VS Code (the
+//              directory under the cursor, else the one being browsed) and
+//              Visual Studio (a .sln in that directory -- named outright when
+//              there is one, picked from a second menu when there are
+//              several). Both are GUI programs, so they are spawned detached
+//              and drift keeps running rather than suspending itself the way
+//              Enter and claude do
 // Claude workspaces:
 // - C        : Toggle the claude workspace browser. Workspaces are anchor
 //              directories under %USERPROFILE%\.drift\workspaces; l/Enter
@@ -168,6 +175,9 @@ typedef struct {
     char application[MAX_PATH];
     char command[CLAUDE_COMMAND_CAP];
 } ClaudeProcessSpec;
+// The solution picker is a single-keystroke list, so it can only offer as many
+// solutions as there are digit keys to name them with
+#define MAX_SOLUTIONS 9
 
 #ifndef DRIFT_MEMBER_LOCK_TIMEOUT_MS
 #define DRIFT_MEMBER_LOCK_TIMEOUT_MS 1500
@@ -251,8 +261,18 @@ bool ResolveClaudeLauncherFromPath(const char* path_value, ClaudeLauncher* out);
 bool ResolveClaudeLauncher(ClaudeLauncher* out);
 bool ResolveVimFromPath(const char* path_value, char out[MAX_PATH]);
 bool ResolveVim(char out[MAX_PATH]);
+bool ResolveVsCodeFromPath(const char* path_value, ClaudeLauncher* out);
+bool ResolveVsCode(ClaudeLauncher* out);
+bool ResolveDevenvFromPath(const char* path_value, ClaudeLauncher* out);
+bool ResolveDevenv(ClaudeLauncher* out);
+bool ResolveVisualStudioLauncher(ClaudeLauncher* out);
+bool BuildLauncherProcessSpec(const ClaudeLauncher* launcher, const char* argument,
+                              ClaudeProcessSpec* out);
 bool BuildClaudeProcessSpec(const ClaudeLauncher* launcher, const char* session_id,
                             ClaudeProcessSpec* out);
+bool SpawnDetached(ClaudeProcessSpec* spec, const char* working_dir);
+int FindSolutionsIn(const char* dir, char names[][MAX_PATH], int max);
+void HandleOpenInEditor();
 int LaunchClaudeIn(const char* anchor, const char* session_id);
 void ScrollOriginalScreen();
 bool IsSafeSessionId(const char* id);
@@ -1328,21 +1348,109 @@ bool ResolveVim(char out[MAX_PATH]) {
     return ResolveAllowedFile(names, 1, out, NULL);
 }
 
-bool BuildClaudeProcessSpec(const ClaudeLauncher* launcher, const char* session_id,
-                            ClaudeProcessSpec* out) {
+// VS Code ships a batch shim (code.cmd) in the bin\ directory its installer
+// puts on PATH; code.exe is listed too for installs that expose one. Same
+// absolute-PATH-entry rule as every other launcher here
+bool ResolveVsCodeFromPath(const char* path_value, ClaudeLauncher* out) {
+    const char* names[] = { "code.cmd", "code.exe" };
+    size_t name_index;
+    out->path[0] = '\0';
+    out->kind = CLAUDE_LAUNCHER_NONE;
+    if (!ResolveAllowedFileFromPath(path_value, names, 2, out->path,
+                                    &name_index)) {
+        return false;
+    }
+    out->kind = name_index == 0 ? CLAUDE_LAUNCHER_CMD : CLAUDE_LAUNCHER_EXE;
+    return true;
+}
+
+bool ResolveVsCode(ClaudeLauncher* out) {
+    const char* names[] = { "code.cmd", "code.exe" };
+    size_t name_index;
+    out->path[0] = '\0';
+    out->kind = CLAUDE_LAUNCHER_NONE;
+    if (!ResolveAllowedFile(names, 2, out->path, &name_index)) return false;
+    out->kind = name_index == 0 ? CLAUDE_LAUNCHER_CMD : CLAUDE_LAUNCHER_EXE;
+    return true;
+}
+
+// Naming devenv.exe outright also sidesteps PATHEXT, where the devenv.com
+// sitting beside it outranks the .exe and would give the console variant
+bool ResolveDevenvFromPath(const char* path_value, ClaudeLauncher* out) {
+    const char* names[] = { "devenv.exe" };
+    out->path[0] = '\0';
+    out->kind = CLAUDE_LAUNCHER_NONE;
+    if (!ResolveAllowedFileFromPath(path_value, names, 1, out->path, NULL)) {
+        return false;
+    }
+    out->kind = CLAUDE_LAUNCHER_EXE;
+    return true;
+}
+
+bool ResolveDevenv(ClaudeLauncher* out) {
+    const char* names[] = { "devenv.exe" };
+    out->path[0] = '\0';
+    out->kind = CLAUDE_LAUNCHER_NONE;
+    if (!ResolveAllowedFile(names, 1, out->path, NULL)) return false;
+    out->kind = CLAUDE_LAUNCHER_EXE;
+    return true;
+}
+
+// The Visual Studio Version Selector, at the fixed shared-component location
+// every Visual Studio since 2010 installs it to. It reads the solution's own
+// "# Visual Studio Version" header and starts the matching install, which is
+// what a double-click in Explorer does -- so a machine with several Visual
+// Studios opens each solution in the one it was written for. A single devenv
+// resolved from PATH cannot do that: it is one fixed install for every
+// solution, which is why it is the fallback rather than the first choice.
+//
+// Built from a well-known directory rather than searched for, exactly like the
+// System32 cmd.exe resolution in BuildLauncherProcessSpec: PATH never
+// participates, so nothing planted on it can answer for Visual Studio.
+bool ResolveVisualStudioLauncher(ClaudeLauncher* out) {
+    out->path[0] = '\0';
+    out->kind = CLAUDE_LAUNCHER_NONE;
+
+    char common[MAX_PATH];
+    DWORD length = GetEnvironmentVariable("CommonProgramFiles(x86)", common, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) {
+        // 32-bit Windows has no (x86) split
+        length = GetEnvironmentVariable("CommonProgramFiles", common, MAX_PATH);
+    }
+    if (length == 0 || length >= MAX_PATH) return false;
+
+    if (snprintf(out->path, MAX_PATH, "%s\\Microsoft Shared\\MSEnv\\VSLauncher.exe",
+                 common) >= MAX_PATH) {
+        out->path[0] = '\0';
+        return false;
+    }
+    DWORD attributes = GetFileAttributes(out->path);
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+        out->path[0] = '\0';
+        return false;
+    }
+    out->kind = CLAUDE_LAUNCHER_EXE;
+    return true;
+}
+
+// Shared by every launcher drift spawns. `argument` is the already-formatted
+// argument tail, or NULL for none -- the caller owns whatever quoting its own
+// argument needs, this owns the launcher's quoting and the cmd wrapper.
+bool BuildLauncherProcessSpec(const ClaudeLauncher* launcher, const char* argument,
+                              ClaudeProcessSpec* out) {
     out->application[0] = '\0';
     out->command[0] = '\0';
-    if (launcher == NULL || launcher->path[0] == '\0' ||
-        (session_id != NULL && !IsSafeSessionId(session_id))) {
+    if (launcher == NULL || launcher->path[0] == '\0') {
         return false;
     }
 
     int written;
     if (launcher->kind == CLAUDE_LAUNCHER_EXE) {
         strcpy(out->application, launcher->path);
-        written = session_id != NULL
+        written = argument != NULL
             ? snprintf(out->command, sizeof(out->command),
-                       "\"%s\" --resume \"%s\"", launcher->path, session_id)
+                       "\"%s\" %s", launcher->path, argument)
             : snprintf(out->command, sizeof(out->command),
                        "\"%s\"", launcher->path);
     } else if (launcher->kind == CLAUDE_LAUNCHER_CMD) {
@@ -1351,6 +1459,12 @@ bool BuildClaudeProcessSpec(const ClaudeLauncher* launcher, const char* session_
         // be rewritten into another command. /d disables AutoRun registry
         // hooks and /v:off prevents delayed !variable! expansion.
         if (strchr(launcher->path, '%') != NULL) return false;
+        // The argument rides the same command line, so it is rewritten by the
+        // same expansion. '%' is legal in a Windows filename, which makes this
+        // reachable from an ordinary folder rather than only a crafted one.
+        // '&', '^', '(' and ')' need no rejection: they are inert inside the
+        // double quotes the caller wraps a path in
+        if (argument != NULL && strchr(argument, '%') != NULL) return false;
         char system_dir[MAX_PATH];
         DWORD length = GetSystemDirectory(system_dir, MAX_PATH);
         if (length == 0 || length >= MAX_PATH) return false;
@@ -1361,10 +1475,10 @@ bool BuildClaudeProcessSpec(const ClaudeLauncher* launcher, const char* session_
         if (attributes == INVALID_FILE_ATTRIBUTES ||
             (attributes & FILE_ATTRIBUTE_DIRECTORY)) return false;
 
-        written = session_id != NULL
+        written = argument != NULL
             ? snprintf(out->command, sizeof(out->command),
-                       "\"%s\" /d /v:off /s /c \"\"%s\" --resume \"%s\"\"",
-                       out->application, launcher->path, session_id)
+                       "\"%s\" /d /v:off /s /c \"\"%s\" %s\"",
+                       out->application, launcher->path, argument)
             : snprintf(out->command, sizeof(out->command),
                        "\"%s\" /d /v:off /s /c \"\"%s\"\"",
                        out->application, launcher->path);
@@ -1372,6 +1486,47 @@ bool BuildClaudeProcessSpec(const ClaudeLauncher* launcher, const char* session_
         return false;
     }
     return written >= 0 && written < (int)sizeof(out->command);
+}
+
+// Claude's own spelling of the above. Kept as the entry point the launcher is
+// built through so the session-id validation stays impossible to bypass, and
+// so the command lines it produces are byte-for-byte what they were before the
+// generalization -- which is what tests/claude_launcher_test.c pins.
+bool BuildClaudeProcessSpec(const ClaudeLauncher* launcher, const char* session_id,
+                            ClaudeProcessSpec* out) {
+    out->application[0] = '\0';
+    out->command[0] = '\0';
+    if (session_id == NULL) {
+        return BuildLauncherProcessSpec(launcher, NULL, out);
+    }
+    if (!IsSafeSessionId(session_id)) return false;
+    // The id field's own capacity plus the fixed "--resume " and its two quotes
+    char argument[sizeof(sessions[0].id) + 16];
+    if (snprintf(argument, sizeof(argument), "--resume \"%s\"", session_id) >=
+        (int)sizeof(argument)) {
+        return false;
+    }
+    return BuildLauncherProcessSpec(launcher, argument, out);
+}
+
+// Hand a GUI program the request and return immediately. Every other launch in
+// drift (vim, claude) is a console program that takes over the terminal, so it
+// swaps to the original screen buffer and blocks; an editor with its own window
+// must do neither, or drift would sit frozen behind it until it was closed.
+// CREATE_NO_WINDOW matters for the cmd shims: without it the intermediate
+// cmd.exe gets a console and paints over the alternate buffer drift is drawing.
+bool SpawnDetached(ClaudeProcessSpec* spec, const char* working_dir) {
+    if (spec == NULL || spec->application[0] == '\0') return false;
+    STARTUPINFO si = {0};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi;
+    if (!CreateProcess(spec->application, spec->command, NULL, NULL, FALSE,
+                       CREATE_NO_WINDOW, NULL, working_dir, &si, &pi)) {
+        return false;
+    }
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return true;
 }
 
 // Suspend the TUI, run claude anchored in the workspace, resume when it exits.
@@ -3312,6 +3467,13 @@ int HandleInput() {
                 EnterAnchorMode();
                 return 1;
             }
+            // Inert here for now. Falling through would open the anchor -- a
+            // lone timestamp folder -- in VS Code, when the useful answer in
+            // this view is the workspace's whole member set as one multi-root
+            // window. Reserved rather than given a misleading meaning
+            if (vk == 'V') {
+                return 1;
+            }
             if (vk == 'R') {
                 HandleRenameWorkspace();
                 return 1;
@@ -3576,6 +3738,10 @@ int HandleInput() {
                 }
                 break;
             }
+            case 'V': {
+                HandleOpenInEditor();
+                break;
+            }
             case 'C': {
                 EnterClaudeMode();
                 break;
@@ -3638,6 +3804,303 @@ void OpenFileInEditor() {
     if (parent_directory[0] != '\0') {
         LoadParentDirectory();
     }
+}
+
+// Solutions directly inside `dir`, one level only. A solution lives at the root
+// of the thing it builds, and drift is a browser -- if it is one level down,
+// step into that folder and press v again rather than have this guess.
+int FindSolutionsIn(const char* dir, char names[][MAX_PATH], int max) {
+    if (dir == NULL || dir[0] == '\0' || max <= 0) return 0;
+    char search[MAX_PATH];
+    if (snprintf(search, MAX_PATH, "%s\\*.sln", dir) >= MAX_PATH) return 0;
+
+    WIN32_FIND_DATA fd;
+    HANDLE hFind = FindFirstFile(search, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) return 0;
+
+    int count = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        // A wildcard pattern also matches against the 8.3 short name, so
+        // "*.sln" can return a .slnx or .sln-backup. Confirm the real extension
+        const char* ext = strrchr(fd.cFileName, '.');
+        if (ext == NULL || _stricmp(ext, ".sln") != 0) continue;
+        // Same contract as GetFilePath: '?' and '*' mean FindFirstFileA
+        // mangled a name it could not represent in the ANSI codepage, and the
+        // mangled spelling would name the wrong file
+        if (strpbrk(fd.cFileName, "?*") != NULL) continue;
+        if (snprintf(names[count], MAX_PATH, "%s\\%s", dir, fd.cFileName) >= MAX_PATH) {
+            continue;
+        }
+        count++;
+    } while (FindNextFile(hFind, &fd) && count < max);
+    FindClose(hFind);
+    return count;
+}
+
+static const char* LeafName(const char* path) {
+    const char* slash = strrchr(path, '\\');
+    // A drive root keeps its separator, so its "leaf" is the empty string --
+    // name the root itself rather than head a popup with nothing
+    return (slash != NULL && slash[1] != '\0') ? slash + 1 : path;
+}
+
+static bool OpenFolderInVsCode(const char* folder) {
+    ClaudeLauncher launcher;
+    if (!ResolveVsCode(&launcher)) return false;
+    char argument[MAX_PATH + 4];
+    if (snprintf(argument, sizeof(argument), "\"%s\"", folder) >=
+        (int)sizeof(argument)) {
+        return false;
+    }
+    ClaudeProcessSpec spec;
+    if (!BuildLauncherProcessSpec(&launcher, argument, &spec)) return false;
+    return SpawnDetached(&spec, folder);
+}
+
+// Three rungs, best first. The version selector opens each solution in the
+// Visual Studio it was written for; devenv from PATH is one fixed install for
+// all of them; the association is whatever a double-click would do. A machine
+// missing the first two still works, which is the point of having all three.
+static bool OpenSolutionInVisualStudio(const char* solution) {
+    char argument[MAX_PATH + 4];
+    if (snprintf(argument, sizeof(argument), "\"%s\"", solution) >=
+        (int)sizeof(argument)) {
+        return false;
+    }
+
+    ClaudeLauncher launcher;
+    ClaudeProcessSpec spec;
+    if (ResolveVisualStudioLauncher(&launcher) &&
+        BuildLauncherProcessSpec(&launcher, argument, &spec) &&
+        SpawnDetached(&spec, NULL)) {
+        return true;
+    }
+    if (ResolveDevenv(&launcher) &&
+        BuildLauncherProcessSpec(&launcher, argument, &spec) &&
+        SpawnDetached(&spec, NULL)) {
+        return true;
+    }
+    // ShellExecute returns a value above 32 on success -- the small returns are
+    // the legacy WinExec error codes, not a handle
+    return (INT_PTR)ShellExecute(NULL, "open", solution, NULL, NULL,
+                                 SW_SHOWNORMAL) > 32;
+}
+
+// Frame, fill and edges for the small centered popups this verb uses. The
+// buffer is the caller's own allocation, sized from popup_h -- not the shared
+// frame buffer -- so popup_h is the only bound on the rows written here.
+static void DrawEditorPopupFrame(CHAR_INFO* popup, int popup_w, int popup_h) {
+    for (int i = 0; i < popup_w * popup_h; i++) {
+        popup[i].Char.UnicodeChar = L' ';
+        popup[i].Attributes = white;
+    }
+    popup[0].Char.UnicodeChar = BOX_TOP_LEFT;
+    popup[popup_w - 1].Char.UnicodeChar = BOX_TOP_RIGHT;
+    int bottom = (popup_h - 1) * popup_w;
+    popup[bottom].Char.UnicodeChar = BOX_BOTTOM_LEFT;
+    popup[bottom + popup_w - 1].Char.UnicodeChar = BOX_BOTTOM_RIGHT;
+    for (int c = 1; c < popup_w - 1; c++) {
+        popup[c].Char.UnicodeChar = BOX_HORIZONTAL;
+        popup[bottom + c].Char.UnicodeChar = BOX_HORIZONTAL;
+    }
+    for (int r = 1; r < popup_h - 1; r++) {
+        popup[r * popup_w].Char.UnicodeChar = BOX_VERTICAL;
+        popup[r * popup_w + popup_w - 1].Char.UnicodeChar = BOX_VERTICAL;
+    }
+}
+
+// One selectable row: what it opens, and a dimmed note about what it will act
+// on -- the folder's name, or the solution's
+#define EDITOR_MENU_MAX (MAX_SOLUTIONS > 2 ? MAX_SOLUTIONS : 2)
+typedef struct {
+    char label[64];
+    char detail[64];
+} EditorMenuItem;
+
+// A menu driven the way the rest of drift is: j/k or the arrow keys move,
+// Enter or l opens, Esc or q backs out. Returns the chosen index, or -1.
+//
+// Repainted every pass rather than drawn once, both because the selection bar
+// moves and because the console reflows on a resize -- so unlike the delete
+// prompt, which must fail closed rather than leave Y armed behind a wiped
+// screen, this one can simply put itself back. Nothing here destroys anything.
+static int RunEditorMenu(const char* title, const EditorMenuItem* items,
+                         int count, const char* note) {
+    if (count <= 0) return -1;
+    const int popup_w = 52;
+    int popup_h = count + (note != NULL ? 1 : 0) + 6;
+
+    CHAR_INFO* popup = (CHAR_INFO*)malloc(popup_w * popup_h * sizeof(CHAR_INFO));
+    if (popup == NULL) return -1;
+
+    int selected = 0;
+    int chosen = -1;
+    while (1) {
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        if (!GetConsoleScreenBufferInfo(hAlt, &info)) break;
+        int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
+        int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
+        // Shrunk too far to show the menu: back out rather than leave keys
+        // live behind nothing
+        if (screen_width < popup_w || screen_height < popup_h) break;
+
+        DrawEditorPopupFrame(popup, popup_w, popup_h);
+        WriteToBuffer(popup, popup_w, 1, 2, title, yellow);
+
+        for (int i = 0; i < count; i++) {
+            int row = 3 + i;
+            WORD attr = white;
+            WORD detail_attr = gray;
+            if (i == selected) {
+                // Black on the silver bar, matching the session list -- and the
+                // dimmed detail has to come up to it or it vanishes
+                attr = bar_background;
+                detail_attr = bar_background;
+                for (int c = 1; c < popup_w - 1; c++) {
+                    popup[row * popup_w + c].Attributes = bar_background;
+                }
+            }
+            WriteToBuffer(popup, popup_w, row, 3, items[i].label, attr);
+            if (items[i].detail[0] != '\0') {
+                WriteToBuffer(popup, popup_w, row, 21, items[i].detail, detail_attr);
+            }
+        }
+        if (note != NULL) {
+            WriteToBuffer(popup, popup_w, 3 + count, 3, note, gray);
+        }
+        WriteToBuffer(popup, popup_w, popup_h - 2, 3,
+                      "j/k move   Enter open   Esc cancel", gray);
+
+        int start_col = info.srWindow.Left + (screen_width - popup_w) / 2;
+        int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
+        COORD buffer_size = { (SHORT)popup_w, (SHORT)popup_h };
+        COORD origin = { 0, 0 };
+        SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
+                              (SHORT)(start_col + popup_w - 1),
+                              (SHORT)(start_row + popup_h - 1) };
+        if (!WriteConsoleOutputW(hAlt, popup, buffer_size, origin, &region)) break;
+
+        INPUT_RECORD input;
+        DWORD events;
+        if (!ReadConsoleInput(hIn, &input, 1, &events)) break;
+        if (input.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            DrawScreen(); // restore what the menu sits on top of
+            continue;     // the loop re-measures and repaints above
+        }
+        if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) continue;
+
+        WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+        if (vk == VK_ESCAPE || vk == 'Q') break;
+        if (vk == VK_DOWN || vk == 'J') {
+            selected = (selected + 1) % count; // wraps, as j does in the list
+        } else if (vk == VK_UP || vk == 'K') {
+            selected = (selected + count - 1) % count;
+        } else if (vk == VK_RETURN || vk == 'L') {
+            chosen = selected;
+            break;
+        } else {
+            // Digit accelerators stay, so a long solution list is still one
+            // keystroke away rather than a scroll
+            char ch = input.Event.KeyEvent.uChar.AsciiChar;
+            if (ch >= '1' && ch < '1' + count) {
+                chosen = ch - '1';
+                break;
+            }
+        }
+    }
+
+    free(popup);
+    return chosen;
+}
+
+// Second step, only when one directory holds several solutions
+static bool PickSolution(char solutions[][MAX_PATH], int count, char out[MAX_PATH]) {
+    EditorMenuItem items[EDITOR_MENU_MAX];
+    if (count > EDITOR_MENU_MAX) count = EDITOR_MENU_MAX;
+    for (int i = 0; i < count; i++) {
+        snprintf(items[i].label, sizeof(items[i].label), "%s",
+                 LeafName(solutions[i]));
+        items[i].detail[0] = '\0';
+    }
+    int chosen = RunEditorMenu("Which solution?", items, count, NULL);
+    if (chosen < 0) return false;
+    snprintf(out, MAX_PATH, "%s", solutions[chosen]);
+    return true;
+}
+
+// 'v': open the thing under the cursor in a real editor. The menu adapts to
+// what is actually there, so the ordinary case -- one solution, or none -- is
+// v then a single key with no second prompt.
+void HandleOpenInEditor() {
+    if (current_directory_file_count == 0) return;
+    WIN32_FIND_DATA* sel = &current_directory_files[selected_row];
+
+    // A directory under the cursor is the subject; on a file it is the
+    // directory being browsed, since "open this folder" is still the useful
+    // answer when the cursor happens to be resting on a README
+    char folder[MAX_PATH];
+    char solutions[MAX_SOLUTIONS][MAX_PATH];
+    int solution_count = 0;
+    if (IsDirectory(sel)) {
+        if (!GetSelectedRowPath(selected_row, folder)) return;
+        solution_count = FindSolutionsIn(folder, solutions, MAX_SOLUTIONS);
+    } else {
+        snprintf(folder, sizeof(folder), "%s", current_directory);
+        // The cursor resting on a solution names it outright -- no reason to
+        // scan for it, or to offer the others beside it
+        const char* ext = strrchr(sel->cFileName, '.');
+        if (ext != NULL && _stricmp(ext, ".sln") == 0 &&
+            GetSelectedRowPath(selected_row, solutions[0])) {
+            solution_count = 1;
+        } else {
+            solution_count = FindSolutionsIn(folder, solutions, MAX_SOLUTIONS);
+        }
+    }
+
+    EditorMenuItem items[EDITOR_MENU_MAX];
+    int item_count = 0;
+    snprintf(items[item_count].label, sizeof(items[0].label), "VS Code");
+    snprintf(items[item_count].detail, sizeof(items[0].detail), "folder");
+    item_count++;
+    if (solution_count == 1) {
+        snprintf(items[item_count].label, sizeof(items[0].label), "Visual Studio");
+        snprintf(items[item_count].detail, sizeof(items[0].detail), "%s",
+                 LeafName(solutions[0]));
+        item_count++;
+    } else if (solution_count > 1) {
+        snprintf(items[item_count].label, sizeof(items[0].label), "Visual Studio");
+        snprintf(items[item_count].detail, sizeof(items[0].detail),
+                 "%d solutions", solution_count);
+        item_count++;
+    }
+
+    char title[80];
+    snprintf(title, sizeof(title), "Open %s in:", LeafName(folder));
+    int chosen = RunEditorMenu(title, items, item_count,
+                               solution_count == 0 ? "(no solution here)" : NULL);
+    if (chosen < 0) return;
+
+    if (chosen == 0) {
+        if (!OpenFolderInVsCode(folder)) {
+            NotifyAndWait("VS Code was not found on PATH -- press a key");
+            return;
+        }
+        ShowStatusBanner("Opening in VS Code...");
+        return;
+    }
+
+    char solution[MAX_PATH];
+    if (solution_count == 1) {
+        snprintf(solution, sizeof(solution), "%s", solutions[0]);
+    } else if (!PickSolution(solutions, solution_count, solution)) {
+        return; // cancelled at the second menu
+    }
+    if (!OpenSolutionInVisualStudio(solution)) {
+        NotifyAndWait("Visual Studio could not be started -- press a key");
+        return;
+    }
+    ShowStatusBanner("Opening in Visual Studio...");
 }
 
 void HandleMarkOperation(enum MarkStatus new_status) {

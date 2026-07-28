@@ -41,7 +41,7 @@ set "status=0"
 set "OUT=%TEMP%\drift_tests"
 if not exist "%OUT%" mkdir "%OUT%"
 
-echo === 1/10  source lint: WriteToBuffer row guards ===
+echo === 1/11  source lint: WriteToBuffer row guards ===
 cl /nologo /W4 tests\lint_row_guards.c /Fe:"%OUT%\lint.exe" /Fo:"%OUT%\lint.obj" >nul
 if errorlevel 1 (
     echo   lint build FAILED
@@ -52,7 +52,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 2/10  regression tests under AddressSanitizer ===
+echo === 2/11  regression tests under AddressSanitizer ===
 cl /nologo /W4 /fsanitize=address /Zi tests\row_guard_test.c /Fe:"%OUT%\row_guard_test.exe" /Fo:"%OUT%\row_guard_test.obj" /Fd:"%OUT%\rgt.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -63,7 +63,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 3/10  path-aware settings JSON regression tests ===
+echo === 3/11  path-aware settings JSON regression tests ===
 cl /nologo /W4 /WX /wd4459 /fsanitize=address /Zi tests\settings_json_test.c /Fe:"%OUT%\settings_json_test.exe" /Fo:"%OUT%\settings_json_test.obj" /Fd:"%OUT%\sjt.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -74,7 +74,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 4/10  anchor-aware workspace membership path regression tests ===
+echo === 4/11  anchor-aware workspace membership path regression tests ===
 cl /nologo /W4 /WX /wd4459 /fsanitize=address /Zi tests\membership_path_test.c /Fe:"%OUT%\membership_path_test.exe" /Fo:"%OUT%\membership_path_test.obj" /Fd:"%OUT%\mpt.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -85,7 +85,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 5/10  concurrent workspace membership regression tests ===
+echo === 5/11  concurrent workspace membership regression tests ===
 cl /nologo /W4 /WX /wd4459 /fsanitize=address /Zi tests\membership_concurrency_test.c /Fe:"%OUT%\membership_concurrency_test.exe" /Fo:"%OUT%\membership_concurrency_test.obj" /Fd:"%OUT%\mct.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -96,7 +96,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 6/10  fail-closed name metadata regression tests ===
+echo === 6/11  fail-closed name metadata regression tests ===
 cl /nologo /W4 /WX /wd4459 /fsanitize=address /Zi tests\name_entry_test.c /Fe:"%OUT%\name_entry_test.exe" /Fo:"%OUT%\name_entry_test.obj" /Fd:"%OUT%\net.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -107,7 +107,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 7/10  resize-safe session-delete modal regression tests ===
+echo === 7/11  resize-safe session-delete modal regression tests ===
 cl /nologo /W4 /WX /wd4459 /fsanitize=address /Zi tests\session_delete_test.c /Fe:"%OUT%\session_delete_test.exe" /Fo:"%OUT%\session_delete_test.obj" /Fd:"%OUT%\sdt.pdb" >"%OUT%\session_delete_build.log" 2>&1
 if errorlevel 1 (
     type "%OUT%\session_delete_build.log"
@@ -119,7 +119,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 8/10  secure Claude launcher regression tests ===
+echo === 8/11  secure Claude launcher regression tests ===
 cl /nologo /W4 /wd4459 /fsanitize=address /Zi tests\claude_launcher_test.c /Fe:"%OUT%\claude_launcher_test.exe" /Fo:"%OUT%\claude_launcher_test.obj" /Fd:"%OUT%\clt.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -130,7 +130,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo === 9/10  secure Vim resolver regression tests ===
+echo === 9/11  secure Vim resolver regression tests ===
 cl /nologo /W4 /WX /wd4459 /fsanitize=address /Zi tests\vim_resolver_test.c /Fe:"%OUT%\vim_resolver_test.exe" /Fo:"%OUT%\vim_resolver_test.obj" /Fd:"%OUT%\vrt.pdb" >nul
 if errorlevel 1 (
     echo   test build FAILED
@@ -141,10 +141,21 @@ if errorlevel 1 (
 )
 echo.
 
+echo === 10/11  open-in-editor launcher regression tests ===
+cl /nologo /W4 /wd4459 /fsanitize=address /Zi tests\editor_launcher_test.c /Fe:"%OUT%\editor_launcher_test.exe" /Fo:"%OUT%\editor_launcher_test.obj" /Fd:"%OUT%\elt.pdb" >nul
+if errorlevel 1 (
+    echo   test build FAILED
+    set "status=1"
+) else (
+    "%OUT%\editor_launcher_test.exe"
+    if errorlevel 1 set "status=1"
+)
+echo.
+
 REM /WX turns any new warning into a failure. C4459 is the one known and
 REM accepted warning: GetSelectedRowPath and GetFilePath take parameters
 REM deliberately named after the globals they shadow.
-echo === 10/10  compile drift.c with full warnings ===
+echo === 11/11  compile drift.c with full warnings ===
 cl /nologo /W4 /WX /wd4459 /c src\drift.c /Fo:"%OUT%\drift_warncheck.obj" >nul
 if errorlevel 1 (
     echo   FAILED: drift.c produced a warning beyond the known C4459 shadowing

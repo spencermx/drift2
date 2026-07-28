@@ -58,6 +58,7 @@ and only needed for the workspace features.
 | `` ` `` or `~` | jump to home |
 | `o` | recently visited directories — pick one with `1`-`9`/`0` |
 | `Enter` | open in vim, or the default application |
+| `v` | open in VS Code, or a solution in Visual Studio |
 | `a` | create a file — or a directory, if the name ends with `\` |
 | `.` | show hidden files (off by default) |
 | `q` | quit |
@@ -81,6 +82,48 @@ Copies, moves and deletes go through the Windows shell as a single batched
 operation — so deletes land in the Recycle Bin as one undo unit, collisions
 become "Copy of…" instead of silent overwrites, and long operations get the
 shell's own progress dialog with a cancel button.
+
+### Opening in an editor — `v`
+
+`Enter` opens one file. `v` opens the whole project:
+
+```
+┌──────────────────────────────────────┐
+│ Open ConsoleApp1 in:                 │
+│                                      │
+│  ███VS Code██████████folder██████████│
+│    Visual Studio     ConsoleApp1.sln │
+│                                      │
+│  j/k move   Enter open   Esc cancel  │
+└──────────────────────────────────────┘
+```
+
+`j`/`k` or the arrow keys move, `Enter` opens, `Esc` backs out — the same as
+everywhere else in drift. The number keys still work as accelerators.
+
+The subject is the directory under the cursor, or the one you're browsing if the
+cursor is on a file. The menu adapts to what's actually there: with a single
+solution it's named outright, with several the second row opens a picker, and
+with none Visual Studio isn't offered at all. A cursor resting on a `.sln` names
+that one directly. Solutions are looked for in that one directory — if it lives a
+level down, step in and press `v` again.
+
+Both editors are GUI programs, so drift spawns them and keeps running rather than
+suspending itself the way `Enter` and the Claude session verbs do.
+
+**Visual Studio** is reached by whichever of these answers first:
+
+1. `VSLauncher.exe`, the Visual Studio Version Selector, from
+   `%CommonProgramFiles(x86)%\Microsoft Shared\MSEnv\`. It reads the solution's
+   own version header, so on a machine with several Visual Studios each solution
+   opens in the one it was written for.
+2. `devenv.exe`, if `...\Common7\IDE` is on your `PATH`. One fixed install for
+   every solution, which is why it's the fallback.
+3. The `.sln` file association — whatever a double-click would do.
+
+**VS Code** is resolved as `code.cmd` or `code.exe` from `PATH`; its installer
+puts `bin\` there. Neither editor is required — if one is missing, `v` says so
+instead of failing silently.
 
 ---
 
