@@ -34,6 +34,14 @@ static bool TestTouch(const char* path) {
     return true;
 }
 
+static bool TestWrite(const char* path, const char* contents) {
+    FILE* file = fopen(path, "wb");
+    if (file == NULL) return false;
+    bool wrote = fputs(contents, file) >= 0;
+    bool closed = fclose(file) == 0;
+    return wrote && closed;
+}
+
 static bool TestRead(const char* path, char* out, size_t out_size) {
     FILE* file = fopen(path, "rb");
     if (file == NULL) return false;
@@ -363,6 +371,83 @@ int main(int argc, char* argv[]) {
     TestReport("a quote in the display name is escaped in the JSON",
                wrote && strstr(generated, "\\\"hi\\\"") != NULL);
     DeleteFile(workspace_file);
+    member_count = 0;
+
+    // ---------------------------------------------------------------------
+    // Staying in step with settings.json, not with the last press of 'v'
+    // ---------------------------------------------------------------------
+    char sync_dir[MAX_PATH], found[MAX_PATH], handmade[MAX_PATH];
+    bool sync_ok = TestJoin(sync_dir, sizeof(sync_dir), root, "sync") &&
+                   TestMakeDirectory(sync_dir);
+
+    // The generated file is always named for the workspace's current display
+    // name, so the name overlay has to be real for this to mean anything.
+    // SetWorkspaceName writes into .drift\, so point DRIFT_HOME at the test
+    // root -- this must not reach the real workspace-names file
+    char saved_home[MAX_PATH];
+    DWORD home_len = GetEnvironmentVariable("DRIFT_HOME", saved_home, MAX_PATH);
+    bool had_home = home_len > 0 && home_len < MAX_PATH;
+    SetEnvironmentVariable("DRIFT_HOME", root);
+    if (!SetWorkspaceName(AnchorFolder(sync_dir), "Before")) {
+        printf("    (could not set the display name for the sync checks)\n");
+    }
+
+    TestReport("an anchor with no workspace file has nothing to refresh",
+               sync_ok && !FindGeneratedCodeWorkspace(sync_dir, found));
+
+    // A file drift did not write must never be adopted, rewritten or removed
+    bool handmade_ok = sync_ok &&
+        TestJoin(handmade, sizeof(handmade), sync_dir, "mine.code-workspace") &&
+        TestWrite(handmade, "{ \"folders\": [ { \"path\": \"C:\\\\mine\" } ] }\n");
+    TestReport("a hand-made workspace file is not claimed as generated",
+               handmade_ok && !IsGeneratedCodeWorkspace(handmade) &&
+               !FindGeneratedCodeWorkspace(sync_dir, found));
+
+    strcpy(members[0], "C:\\repo\\one");
+    member_count = 1;
+    bool gen_ok = WriteCodeWorkspaceFile(sync_dir, "Before", workspace_file);
+    TestReport("a generated workspace file is recognised beside a hand-made one",
+               gen_ok && IsGeneratedCodeWorkspace(workspace_file) &&
+               FindGeneratedCodeWorkspace(sync_dir, found) &&
+               _stricmp(found, workspace_file) == 0);
+
+    // A membership change refreshes it in place, without a new 'v'
+    strcpy(members[1], "C:\\repo\\added");
+    member_count = 2;
+    RefreshCodeWorkspaceFile(sync_dir);
+    bool refreshed = TestRead(workspace_file, generated, sizeof(generated));
+    TestReport("a membership change is picked up without reopening",
+               refreshed &&
+               strstr(generated, "C:\\\\repo\\\\added") != NULL &&
+               GetFileAttributes(handmade) != INVALID_FILE_ATTRIBUTES);
+
+    // A rename moves it, because VS Code titles the window from the filename
+    if (!SetWorkspaceName(AnchorFolder(sync_dir), "After")) {
+        printf("    (could not set the display name for the rename check)\n");
+    }
+    RefreshCodeWorkspaceFile(sync_dir);
+    char renamed[MAX_PATH];
+    bool moved = FindGeneratedCodeWorkspace(sync_dir, renamed);
+    TestReport("a rename moves the generated file and drops the old name",
+               moved && _stricmp(LeafName(renamed), "After.code-workspace") == 0 &&
+               GetFileAttributes(workspace_file) == INVALID_FILE_ATTRIBUTES);
+    TestReport("the hand-made file survives every refresh",
+               GetFileAttributes(handmade) != INVALID_FILE_ATTRIBUTES &&
+               TestRead(handmade, generated, sizeof(generated)) &&
+               strstr(generated, "C:\\\\mine") != NULL);
+
+    SetWorkspaceName(AnchorFolder(sync_dir), "");
+    char names_file[MAX_PATH], drift_dir[MAX_PATH];
+    if (TestJoin(drift_dir, sizeof(drift_dir), root, ".drift") &&
+        TestJoin(names_file, sizeof(names_file), drift_dir, "workspace-names")) {
+        DeleteFile(names_file);
+        RemoveDirectory(drift_dir);
+    }
+    SetEnvironmentVariable("DRIFT_HOME", had_home ? saved_home : NULL);
+    workspace_names_loaded = false; // the cache now names a deleted file
+    DeleteFile(renamed);
+    DeleteFile(handmade);
+    RemoveDirectory(sync_dir);
     member_count = 0;
 
     // ---------------------------------------------------------------------
