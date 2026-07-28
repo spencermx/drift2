@@ -42,9 +42,10 @@
 //              workspace gets an empty CLAUDE.md to fill in; an existing one
 //              is never rewritten. Ordinary browsing, and h at the anchor
 //              root (or Esc/c) returns to the workspace list. Quitting with
-//              q instead leaves the shell in the anchor -- the one place
-//              claude mode moves the directory drift exits into, since
-//              nothing else leads to a folder named for a timestamp
+//              q instead leaves the shell in the directory the browse had
+//              reached -- the one place claude mode moves the directory
+//              drift exits into, since nothing else leads to a folder
+//              named for a timestamp
 // - R        : (in the workspace list) rename a workspace's drift display
 //              name (stored in .drift\workspace-names); the folder itself
 //              is never renamed, so its sessions stay associated
@@ -4645,18 +4646,23 @@ void Cleanup() {
         snprintf(temp_path, MAX_PATH, "%s\\browser_lastdir.txt", temp);
 
         // Claude mode builds and edits workspaces; it is not navigation, so
-        // quitting out of it lands the shell wherever drift was browsing when
-        // 'c' was pressed. The exits unwind the cwd themselves (ExitClaudeMode
-        // and friends, on H/C/Esc), but 'q' leaves from wherever the mode had
-        // gone: the workspace and session views sit in .drift\workspaces, and
-        // an edit browse roams anywhere at all while shopping for member
-        // folders. Neither is a directory the user navigated to on purpose.
+        // quitting out of it lands the shell where drift was browsing when
+        // 'c' was pressed. The exits put current_directory back themselves
+        // (ExitClaudeMode and friends, on h/c/Esc), but 'q' leaves from
+        // wherever the mode had reached: the workspace and session views sit
+        // in .drift\workspaces, and an edit browse roams anywhere at all --
+        // it roams to pick member folders, though, not to pick a destination.
         //
         // The anchor browse is the deliberate exception. Its folder is a
         // minted timestamp that nothing else leads to and no one would type,
         // so quitting there is the only way a shell reaches it -- the same
         // reason 'f' exists at all (see EnterAnchorMode). anchor_armed is
-        // therefore absent below on purpose: it keeps current_directory.
+        // therefore absent from the test on purpose, which leaves that browse
+        // on current_directory: whichever directory under the anchor it had
+        // reached. That makes the containment in HandleInput load-bearing --
+        // '`', '~' and 'o' are inert while armed, and 'h' at the anchor root
+        // exits the mode rather than stepping up into .drift\workspaces, so
+        // an armed browse cannot be standing outside the anchor by this point
         const char* final_dir = (claude_mode != CM_OFF || edit_armed) ? claude_return_dir
                                                                      : current_directory;
 
