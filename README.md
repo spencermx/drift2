@@ -61,7 +61,12 @@ and only needed for the workspace features.
 | `v` | open in VS Code, or a solution in Visual Studio |
 | `a` | create a file — or a directory, if the name ends with `\` |
 | `.` | show hidden files (off by default) |
+| `?` or `F1` | every binding, in one scrollable page |
 | `q` | quit |
+
+`?` works from every mode, which is the point of it — drift's four modes rebind
+the same letters, so the page names the mode each group belongs to. `j`/`k`,
+`Ctrl+d`/`Ctrl+u` and `Page Up`/`Page Down` scroll it; `Esc` closes.
 
 ### Marking and file operations
 
