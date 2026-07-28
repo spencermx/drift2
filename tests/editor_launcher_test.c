@@ -337,9 +337,13 @@ int main(int argc, char* argv[]) {
     TestReport("the workspace file is named for the display name",
                wrote && _stricmp(LeafName(workspace_file),
                                  "My Workspace.code-workspace") == 0);
-    TestReport("the anchor itself leads the folder list",
+    // The anchor is drift's own plumbing, not something being worked on
+    TestReport("the anchor is not one of the folders",
+               wrote && strstr(generated, "\"path\": \".\"") == NULL &&
+               strstr(generated, LeafName(one)) == NULL);
+    TestReport("the first member carries no leading comma",
                wrote && strstr(generated,
-                   "{ \"path\": \".\", \"name\": \"My Workspace\" }") != NULL);
+                   "[\n    { \"path\": \"C:\\\\repo\\\\one\" }") != NULL);
     TestReport("member paths are written with JSON-escaped separators",
                wrote &&
                strstr(generated, "{ \"path\": \"C:\\\\repo\\\\one\" }") != NULL &&
@@ -365,13 +369,17 @@ int main(int argc, char* argv[]) {
                                  "one-solution.code-workspace") == 0);
     DeleteFile(workspace_file);
 
-    // A quote in a display name must not break out of the JSON string
-    wrote = WriteCodeWorkspaceFile(one, "say \"hi\"", workspace_file) &&
-            TestRead(workspace_file, generated, sizeof(generated));
-    TestReport("a quote in the display name is escaped in the JSON",
-               wrote && strstr(generated, "\\\"hi\\\"") != NULL);
+    // The display name only reaches the filename now, so a quote in it has to
+    // be handled there rather than in the document
+    wrote = WriteCodeWorkspaceFile(one, "say \"hi\"", workspace_file);
+    TestReport("a quote in the display name is replaced in the filename",
+               wrote && _stricmp(LeafName(workspace_file),
+                                 "say -hi-.code-workspace") == 0);
     DeleteFile(workspace_file);
+
     member_count = 0;
+    TestReport("a workspace with no folders is refused rather than emptied",
+               !WriteCodeWorkspaceFile(one, "Empty", workspace_file));
 
     // ---------------------------------------------------------------------
     // Staying in step with settings.json, not with the last press of 'v'

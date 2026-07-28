@@ -208,17 +208,17 @@ that:
   // Edits here are overwritten. Put your own settings in a
   // member folder's .vscode\settings.json instead.
   "folders": [
-    { "path": ".", "name": "rusty" },
     { "path": "C:\\Users\\spencer\\.config" },
     { "path": "C:\\Users\\spencer\\.dotnet" }
   ]
 }
 ```
 
-The anchor leads the list, so the workspace's own `CLAUDE.md` is in the tree
-alongside the code. Because `"."` resolves against the workspace file's own
-directory, that file has to live at the anchor root — which is also why it shows
-up beside `CLAUDE.md` rather than tucked inside `.claude\`.
+The member folders and nothing else. The anchor holds the file and is where
+Claude runs, but it's drift's own plumbing rather than something you're working
+on, so it stays out of the tree. Paths are written absolute, since a member
+stored relative belongs to the anchor and VS Code would otherwise resolve it
+against the workspace file's directory.
 
 It's a real file rather than a one-off invocation because VS Code has no flag
 that opens N folders as a single window: `--add` targets "the last active

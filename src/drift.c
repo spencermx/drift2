@@ -2910,22 +2910,29 @@ static bool WriteCodeWorkspaceFile(const char* anchor, const char* display,
                   "  // Edits here are overwritten. Put your own settings in a\n"
                   "  // member folder's .vscode\\settings.json instead.\n"
                   "  \"folders\": [\n");
-    // The anchor first: it is where claude runs and where CLAUDE.md lives, so
-    // the workspace's own notes belong in the tree. "." resolves against this
-    // file's directory, which is why the file has to sit at the anchor root.
-    // Its folder name is a bare timestamp, so give it the display name instead
-    n = AppendFmt(text, n, cap, "    { \"path\": \".\", \"name\": \"");
-    n = AppendJsonEscaped(text, n, cap, display);
-    n = AppendFmt(text, n, cap, "\" }");
 
+    // The member folders and nothing else. The anchor is where claude runs and
+    // where this file lives, but it is drift's own plumbing rather than
+    // something being worked on, so it does not belong in the tree
+    bool first = true;
     for (int i = 0; i < member_count; i++) {
         char resolved[MAX_PATH];
-        // The configured spelling may be relative; VS Code would resolve it
-        // against this file rather than against the anchor claude runs in
+        // Written absolute: the configured spelling may be relative to the
+        // anchor claude runs in, and VS Code would resolve it against this
+        // file's directory instead
         if (!ResolveMemberPath(anchor, members[i], resolved)) continue;
-        n = AppendFmt(text, n, cap, ",\n    { \"path\": \"");
+        n = AppendFmt(text, n, cap, first ? "    { \"path\": \""
+                                          : ",\n    { \"path\": \"");
         n = AppendJsonEscaped(text, n, cap, resolved);
         n = AppendFmt(text, n, cap, "\" }");
+        first = false;
+    }
+    // An empty folders array opens VS Code on nothing at all. Callers refuse a
+    // workspace with no members, and a blocked settings.json never reaches
+    // here, so this only catches every path failing to resolve at once
+    if (first) {
+        free(text);
+        return false;
     }
     n = AppendFmt(text, n, cap, "\n  ]\n}\n");
 
