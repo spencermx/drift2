@@ -5,7 +5,7 @@ runtime dependencies — plus a workspace manager for Claude Code built on top o
 it.
 
 ```
-C:\Users\spencer\source\repos\drift\src                                   1/2
+C:\Users\spencer\source\repos\drift\src                        ?  help     1/2
 ─────────────────────────┬────────────────────────┬───────────────────────────
   .git                   │ ███drift.c█████████████│ // A simple terminal file
   build                  │    settings_json.h     │ // browser for Windows
@@ -61,12 +61,15 @@ and only needed for the workspace features.
 | `v` | open in VS Code, or a solution in Visual Studio |
 | `a` | create a file — or a directory, if the name ends with `\` |
 | `.` | show hidden files (off by default) |
-| `?` or `F1` | every binding, in one scrollable page |
+| `?` or `F1` | key reference overlay |
 | `q` | quit |
 
-`?` works from every mode, which is the point of it — drift's four modes rebind
-the same letters, so the page names the mode each group belongs to. `j`/`k`,
-`Ctrl+d`/`Ctrl+u` and `Page Up`/`Page Down` scroll it; `Esc` closes.
+The header carries a `?  help` hint, since a binding you can't discover may as
+well not exist. The overlay opens from every mode and groups its keys by mode,
+because drift's four modes rebind the same letters — `d` deletes files, deletes
+a workspace, or deletes a session depending on where you are. It lists only what
+you couldn't guess: ordinary vim motion is assumed, so `hjkl`, `gg`/`G` and the
+half-page chords aren't in it. `Esc` closes.
 
 ### Marking and file operations
 
@@ -158,6 +161,7 @@ r    rename workspace    │                        │
 y/p  duplicate           │                        │
 d    delete workspace    │                        │
 c    back to files       │                        │
+?    all keys            │                        │
 ```
 
 `l` opens a workspace's sessions; `h` or `c` backs out. `drift -c` boots

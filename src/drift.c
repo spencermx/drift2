@@ -24,8 +24,10 @@
 // - O        : Show visited directories and jump to selected one
 // - A        : Create new file/directory (append '\' to name for directory)
 // - .        : Toggle showing hidden files (hidden by default)
-// - ? or F1  : Every binding, in one scrollable page. Available from every
-//              mode, since the same letters mean different things in each
+// - ? or F1  : Key reference overlay, announced by a "?  help" hint in the
+//              header. Available from every mode and grouped by mode, since
+//              the same letters mean different things in each. Lists only
+//              what cannot be guessed -- vim motion is assumed
 // - V        : Open in an editor. A j/k-and-Enter menu offers VS Code (the
 //              directory under the cursor, else the one being browsed) and
 //              Visual Studio (a .sln in that directory -- named outright when
@@ -632,6 +634,20 @@ void DrawScreen() {
             WriteToBuffer(buffer, width, 0, right_col, right_info, white);
         }
 
+        // The one binding that leads to all the others, so it is the one that
+        // has to be visible without already knowing it. Sits just left of the
+        // counter in every mode, and is dropped rather than crowding a narrow
+        // header -- the path and the column labels have the better claim on
+        // that space, since they say what is actually on screen
+        const char* help_hint = "?  help";
+        int hint_col = right_col - (int)strlen(help_hint) - 2;
+        bool show_hint = hint_col > COLUMN_DIVIDER_POSITION;
+        if (show_hint) {
+            WriteToBuffer(buffer, width, 0, hint_col, help_hint, gray);
+        }
+        // Everything else in the header stops short of whichever comes first
+        int header_limit = show_hint ? hint_col : right_col;
+
         // Claude mode announces itself with a "Claude Mode" banner on the
         // left (yellow) plus a header over the column that holds the list, so
         // the column's contents are labeled. Ordinary browsing shows the path
@@ -648,16 +664,16 @@ void DrawScreen() {
             // into the right-hand counter.
             if (claude_mode == CM_WORKSPACES) {
                 int wcol = COLUMN_DIVIDER_POSITION + 4;
-                if (wcol + (int)strlen("Workspaces") < right_col) {
+                if (wcol + (int)strlen("Workspaces") < header_limit) {
                     WriteToBuffer(buffer, width, 0, wcol, "Workspaces", gray);
                 }
                 int scol = divider2 + 2;
-                if (three_pane && scol + (int)strlen("Sessions") < right_col) {
+                if (three_pane && scol + (int)strlen("Sessions") < header_limit) {
                     WriteToBuffer(buffer, width, 0, scol, "Sessions", gray);
                 }
             } else { // CM_SESSIONS
                 int scol = COLUMN_DIVIDER_POSITION + 2;
-                if (scol + (int)strlen("Sessions") < right_col) {
+                if (scol + (int)strlen("Sessions") < header_limit) {
                     WriteToBuffer(buffer, width, 0, scol, "Sessions", gray);
                 }
             }
@@ -679,7 +695,7 @@ void DrawScreen() {
                 WriteToBuffer(buffer, width, 0, 0, tag, yellow);
                 path_col = (int)strlen(tag);
             }
-            int path_avail = right_col - 2 - path_col;
+            int path_avail = header_limit - 2 - path_col;
             int path_len = (int)strlen(header_path);
             char path_display[MAX_PATH + 4];
             if (path_len <= path_avail) {
@@ -3448,6 +3464,7 @@ void DrawClaudeHelpPane(CHAR_INFO* buffer, int width, int height) {
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "y/p  duplicate", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "d    delete workspace", gray);
     if (row < height) WriteToBuffer(buffer, width, row++, 0, "c    back to files", gray);
+    if (row < height) WriteToBuffer(buffer, width, row++, 0, "?    all keys", gray);
 }
 
 // Third pane on the workspace list: live sessions preview for the
@@ -3574,61 +3591,60 @@ typedef struct {
 } HelpEntry;
 
 static const HelpEntry help_entries[] = {
-    { "Browsing", NULL },
-    { "h  j  k  l",    "parent / down / up / enter" },
-    { "gg  G",         "top / bottom" },
-    { "Ctrl+d Ctrl+u", "half page down / up" },
-    { "`  ~",          "jump to the home directory" },
-    { "o",             "recently visited directories" },
-    { "Enter",         "open in vim, or the default application" },
-    { "v",             "open in VS Code, or a .sln in Visual Studio" },
-    { "a",             "create a file -- or a directory, if it ends with \\" },
-    { ".",             "show hidden files" },
-    { "?  F1",         "this page" },
-    { "q",             "quit" },
-    { "", NULL },
-
-    { "Marking and file operations", NULL },
-    { "Space",         "mark / unmark, and step down" },
-    { "Ctrl+a",        "mark everything here" },
-    { "Esc  Ctrl+[",   "clear marks" },
-    { "y  x",          "yank (copy) / cut" },
-    { "p",             "paste into this directory" },
-    { "d",             "delete, with a confirmation" },
+    { "Files", NULL },
+    { "Space",    "mark / unmark" },
+    { "Ctrl+a",   "mark everything here" },
+    { "y  x  p",  "yank / cut / paste" },
+    { "d",        "delete to the Recycle Bin" },
+    { "a",        "create a file, or a dir ending in \\" },
+    { "Enter",    "open in vim, else the default app" },
+    { "v",        "open in VS Code / Visual Studio" },
+    { "o",        "recently visited directories" },
+    { "`",        "jump to the home directory" },
+    { ".",        "show hidden files" },
     { "", NULL },
 
     { "Claude workspaces", NULL },
-    { "c",             "open the workspace list" },
-    { "Shift+W",       "add this folder to a workspace" },
+    { "c",        "open the workspace list" },
+    { "Shift+W",  "add this folder to a workspace" },
     { "", NULL },
 
     { "In the workspace list", NULL },
-    { "l  Enter",      "open its sessions" },
-    { "n",             "start a new session" },
-    { "e",             "edit which folders it opens" },
-    { "f",             "browse the workspace's own files" },
-    { "v",             "open every folder in one VS Code window" },
-    { "a  r  d",       "new / rename / delete workspace" },
-    { "y  p",          "duplicate" },
-    { "h  c  Esc",     "back to files" },
+    { "l",        "its sessions" },
+    { "n",        "start a new session" },
+    { "e",        "choose which folders it opens" },
+    { "f",        "browse its own files" },
+    { "v",        "open all its folders in VS Code" },
+    { "a  r  d",  "new / rename / delete workspace" },
+    { "y  p",     "duplicate" },
     { "", NULL },
 
     { "In the session list", NULL },
-    { "Enter  l",      "resume the session in claude" },
-    { "n  r  d",       "new / rename / delete session" },
-    { "h  Esc",        "back to the workspace list" },
-    { "c",             "back to files" },
+    { "Enter",    "resume it in claude" },
+    { "n  r  d",  "new / rename / delete session" },
     { "", NULL },
 
-    { "While editing a workspace's folders", NULL },
-    { "Space",         "add / remove the directory under the cursor" },
-    { "Tab  l",        "focus the folder list" },
-    { "j  k",          "move within it" },
-    { "Space  x",      "remove the selected folder" },
-    { "Enter",         "jump the browser to that folder" },
-    { "Esc  c",        "done" },
+    { "Choosing a workspace's folders", NULL },
+    { "Space",    "add / remove the folder here" },
+    { "Tab",      "focus the folder list" },
+    { "x",        "remove the selected folder" },
+    { "Enter",    "jump the browser to it" },
+    { "Esc",      "done" },
 };
 
+#define HELP_POPUP_WIDTH 52
+#define HELP_KEY_COLUMN 2
+#define HELP_TEXT_COLUMN 14
+
+// Shared with the editor menus, which own it; declared here because they are
+// defined further down the file
+static void DrawEditorPopupFrame(CHAR_INFO* popup, int popup_w, int popup_h);
+
+// A centered overlay sized to its contents, capped to the window. Everything
+// here is a binding you could not guess: ordinary vim motion is assumed, so
+// h/j/k/l, gg/G and the half-page chords are deliberately absent -- listing
+// them was what made this too tall to be a popup in the first place. It only
+// scrolls when a short window forces the cap to bite.
 void ShowHelp() {
     const int count = (int)(sizeof(help_entries) / sizeof(help_entries[0]));
     int top = 0;
@@ -3636,74 +3652,62 @@ void ShowHelp() {
     while (1) {
         CONSOLE_SCREEN_BUFFER_INFO info;
         if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
-        int width = info.srWindow.Right - info.srWindow.Left + 1;
-        int height = info.srWindow.Bottom - info.srWindow.Top + 1;
-        if (width < MIN_WINDOW_WIDTH || height < MIN_WINDOW_HEIGHT) return;
+        int screen_width = info.srWindow.Right - info.srWindow.Left + 1;
+        int screen_height = info.srWindow.Bottom - info.srWindow.Top + 1;
 
-        // Row 0 is the title, row 1 the rule, and the last row the footer
-        int visible = height - 3;
-        if (visible < 1) return;
+        // Top border, one row per entry, the footer, the bottom border
+        int popup_h = count + 3;
+        if (popup_h > screen_height - 2) popup_h = screen_height - 2;
+        if (screen_width < HELP_POPUP_WIDTH + 2 || popup_h < 6) return;
+        int visible = popup_h - 3;
+
         if (top > count - visible) top = count - visible;
         if (top < 0) top = 0;
 
-        CHAR_INFO* buffer = (CHAR_INFO*)malloc(width * height * sizeof(CHAR_INFO));
-        if (buffer == NULL) return;
-        for (int i = 0; i < width * height; i++) {
-            buffer[i].Char.UnicodeChar = L' ';
-            buffer[i].Attributes = white;
-        }
+        CHAR_INFO* popup = (CHAR_INFO*)malloc(
+            HELP_POPUP_WIDTH * popup_h * sizeof(CHAR_INFO));
+        if (popup == NULL) return;
+        DrawEditorPopupFrame(popup, HELP_POPUP_WIDTH, popup_h);
 
-        WriteToBuffer(buffer, width, 0, 0, "drift -- keys", blue);
-        if (count > visible) {
-            char position[32];
-            snprintf(position, sizeof(position), "%d%%",
-                     count - visible <= 0 ? 100 : top * 100 / (count - visible));
-            int col = width - (int)strlen(position) - 1;
-            if (col > 14) WriteToBuffer(buffer, width, 0, col, position, gray);
-        }
-        for (int col = 0; col < width; col++) {
-            buffer[width + col].Char.UnicodeChar = BOX_HORIZONTAL;
-            buffer[width + col].Attributes = blue;
-        }
-
-        // Bounded by `visible`, so the last row written is height - 2 -- the
-        // footer's row is never overwritten and nothing reaches height
+        // Bounded by `visible`, so the last content row is popup_h - 3 and the
+        // footer's row below it is never overwritten
         for (int i = 0; i < visible && top + i < count; i++) {
             const HelpEntry* entry = &help_entries[top + i];
-            int row = 2 + i;
+            int row = 1 + i;
             if (entry->text == NULL) {
                 if (entry->keys[0] != '\0') {
-                    WriteToBuffer(buffer, width, row, 1, entry->keys, yellow);
+                    WriteToBuffer(popup, HELP_POPUP_WIDTH, row, HELP_KEY_COLUMN,
+                                  entry->keys, yellow);
                 }
                 continue;
             }
-            WriteToBuffer(buffer, width, row, 3, entry->keys, white);
-            if (width > 24) {
-                WriteToBuffer(buffer, width, row, 21, entry->text, gray);
-            }
+            WriteToBuffer(popup, HELP_POPUP_WIDTH, row, HELP_KEY_COLUMN,
+                          entry->keys, white);
+            WriteToBuffer(popup, HELP_POPUP_WIDTH, row, HELP_TEXT_COLUMN,
+                          entry->text, gray);
         }
 
-        WriteToBuffer(buffer, width, height - 1, 1,
-                      count > visible ? "j/k scroll   Esc close"
-                                      : "Esc close", gray);
+        WriteToBuffer(popup, HELP_POPUP_WIDTH, popup_h - 2, HELP_KEY_COLUMN,
+                      count > visible ? "j/k scroll   Esc close" : "Esc close",
+                      gray);
 
-        COORD buffer_size = { (SHORT)width, (SHORT)height };
+        int start_col = info.srWindow.Left + (screen_width - HELP_POPUP_WIDTH) / 2;
+        int start_row = info.srWindow.Top + (screen_height - popup_h) / 2;
+        COORD buffer_size = { (SHORT)HELP_POPUP_WIDTH, (SHORT)popup_h };
         COORD origin = { 0, 0 };
-        SMALL_RECT region = {
-            info.srWindow.Left,
-            info.srWindow.Top,
-            (SHORT)(info.srWindow.Left + width - 1),
-            (SHORT)(info.srWindow.Top + height - 1)
-        };
-        BOOL written = WriteConsoleOutputW(hAlt, buffer, buffer_size, origin, &region);
-        free(buffer);
+        SMALL_RECT region = { (SHORT)start_col, (SHORT)start_row,
+                              (SHORT)(start_col + HELP_POPUP_WIDTH - 1),
+                              (SHORT)(start_row + popup_h - 1) };
+        BOOL written = WriteConsoleOutputW(hAlt, popup, buffer_size, origin, &region);
+        free(popup);
         if (!written) return;
 
         INPUT_RECORD input;
         DWORD events;
         if (!ReadConsoleInput(hIn, &input, 1, &events)) return;
         if (input.EventType == WINDOW_BUFFER_SIZE_EVENT) {
-            continue; // the loop re-measures and repaints at the new size
+            DrawScreen(); // restore what the overlay sits on top of
+            continue;     // the loop re-measures and repaints above
         }
         if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) continue;
 
