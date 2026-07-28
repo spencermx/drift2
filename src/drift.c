@@ -24,6 +24,8 @@
 // - O        : Show visited directories and jump to selected one
 // - A        : Create new file/directory (append '\' to name for directory)
 // - .        : Toggle showing hidden files (hidden by default)
+// - ? or F1  : Every binding, in one scrollable page. Available from every
+//              mode, since the same letters mean different things in each
 // - V        : Open in an editor. A j/k-and-Enter menu offers VS Code (the
 //              directory under the cursor, else the one being browsed) and
 //              Visual Studio (a .sln in that directory -- named outright when
@@ -215,6 +217,7 @@ enum MemberLockResult {
 
 // =========================== Function Declarations =========================
 void DrawScreen();
+void ShowHelp();
 int HandleInput();
 void ModifySelectedRow(int num);
 void ChangeCurrentDirectory(char* path);
@@ -3559,6 +3562,171 @@ void DrawManifestPane(CHAR_INFO* buffer, int width, int height, int divider2) {
 }
 // ============================= Claude Workspaces =================================
 
+// ============================= Help ==============================================
+// Every binding in one place. Drift's keys are split across four modes that each
+// rebind the same letters, so the reference has to name the mode a key belongs
+// to -- which is also why this is one scrollable page rather than a popup: the
+// list is longer than a short terminal, and the answer to "what does d do here"
+// depends on where "here" is.
+typedef struct {
+    const char* keys;
+    const char* text; // NULL makes `keys` a section heading; "" a blank line
+} HelpEntry;
+
+static const HelpEntry help_entries[] = {
+    { "Browsing", NULL },
+    { "h  j  k  l",    "parent / down / up / enter" },
+    { "gg  G",         "top / bottom" },
+    { "Ctrl+d Ctrl+u", "half page down / up" },
+    { "`  ~",          "jump to the home directory" },
+    { "o",             "recently visited directories" },
+    { "Enter",         "open in vim, or the default application" },
+    { "v",             "open in VS Code, or a .sln in Visual Studio" },
+    { "a",             "create a file -- or a directory, if it ends with \\" },
+    { ".",             "show hidden files" },
+    { "?  F1",         "this page" },
+    { "q",             "quit" },
+    { "", NULL },
+
+    { "Marking and file operations", NULL },
+    { "Space",         "mark / unmark, and step down" },
+    { "Ctrl+a",        "mark everything here" },
+    { "Esc  Ctrl+[",   "clear marks" },
+    { "y  x",          "yank (copy) / cut" },
+    { "p",             "paste into this directory" },
+    { "d",             "delete, with a confirmation" },
+    { "", NULL },
+
+    { "Claude workspaces", NULL },
+    { "c",             "open the workspace list" },
+    { "Shift+W",       "add this folder to a workspace" },
+    { "", NULL },
+
+    { "In the workspace list", NULL },
+    { "l  Enter",      "open its sessions" },
+    { "n",             "start a new session" },
+    { "e",             "edit which folders it opens" },
+    { "f",             "browse the workspace's own files" },
+    { "v",             "open every folder in one VS Code window" },
+    { "a  r  d",       "new / rename / delete workspace" },
+    { "y  p",          "duplicate" },
+    { "h  c  Esc",     "back to files" },
+    { "", NULL },
+
+    { "In the session list", NULL },
+    { "Enter  l",      "resume the session in claude" },
+    { "n  r  d",       "new / rename / delete session" },
+    { "h  Esc",        "back to the workspace list" },
+    { "c",             "back to files" },
+    { "", NULL },
+
+    { "While editing a workspace's folders", NULL },
+    { "Space",         "add / remove the directory under the cursor" },
+    { "Tab  l",        "focus the folder list" },
+    { "j  k",          "move within it" },
+    { "Space  x",      "remove the selected folder" },
+    { "Enter",         "jump the browser to that folder" },
+    { "Esc  c",        "done" },
+};
+
+void ShowHelp() {
+    const int count = (int)(sizeof(help_entries) / sizeof(help_entries[0]));
+    int top = 0;
+
+    while (1) {
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        if (!GetConsoleScreenBufferInfo(hAlt, &info)) return;
+        int width = info.srWindow.Right - info.srWindow.Left + 1;
+        int height = info.srWindow.Bottom - info.srWindow.Top + 1;
+        if (width < MIN_WINDOW_WIDTH || height < MIN_WINDOW_HEIGHT) return;
+
+        // Row 0 is the title, row 1 the rule, and the last row the footer
+        int visible = height - 3;
+        if (visible < 1) return;
+        if (top > count - visible) top = count - visible;
+        if (top < 0) top = 0;
+
+        CHAR_INFO* buffer = (CHAR_INFO*)malloc(width * height * sizeof(CHAR_INFO));
+        if (buffer == NULL) return;
+        for (int i = 0; i < width * height; i++) {
+            buffer[i].Char.UnicodeChar = L' ';
+            buffer[i].Attributes = white;
+        }
+
+        WriteToBuffer(buffer, width, 0, 0, "drift -- keys", blue);
+        if (count > visible) {
+            char position[32];
+            snprintf(position, sizeof(position), "%d%%",
+                     count - visible <= 0 ? 100 : top * 100 / (count - visible));
+            int col = width - (int)strlen(position) - 1;
+            if (col > 14) WriteToBuffer(buffer, width, 0, col, position, gray);
+        }
+        for (int col = 0; col < width; col++) {
+            buffer[width + col].Char.UnicodeChar = BOX_HORIZONTAL;
+            buffer[width + col].Attributes = blue;
+        }
+
+        // Bounded by `visible`, so the last row written is height - 2 -- the
+        // footer's row is never overwritten and nothing reaches height
+        for (int i = 0; i < visible && top + i < count; i++) {
+            const HelpEntry* entry = &help_entries[top + i];
+            int row = 2 + i;
+            if (entry->text == NULL) {
+                if (entry->keys[0] != '\0') {
+                    WriteToBuffer(buffer, width, row, 1, entry->keys, yellow);
+                }
+                continue;
+            }
+            WriteToBuffer(buffer, width, row, 3, entry->keys, white);
+            if (width > 24) {
+                WriteToBuffer(buffer, width, row, 21, entry->text, gray);
+            }
+        }
+
+        WriteToBuffer(buffer, width, height - 1, 1,
+                      count > visible ? "j/k scroll   Esc close"
+                                      : "Esc close", gray);
+
+        COORD buffer_size = { (SHORT)width, (SHORT)height };
+        COORD origin = { 0, 0 };
+        SMALL_RECT region = {
+            info.srWindow.Left,
+            info.srWindow.Top,
+            (SHORT)(info.srWindow.Left + width - 1),
+            (SHORT)(info.srWindow.Top + height - 1)
+        };
+        BOOL written = WriteConsoleOutputW(hAlt, buffer, buffer_size, origin, &region);
+        free(buffer);
+        if (!written) return;
+
+        INPUT_RECORD input;
+        DWORD events;
+        if (!ReadConsoleInput(hIn, &input, 1, &events)) return;
+        if (input.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            continue; // the loop re-measures and repaints at the new size
+        }
+        if (input.EventType != KEY_EVENT || !input.Event.KeyEvent.bKeyDown) continue;
+
+        WORD vk = input.Event.KeyEvent.wVirtualKeyCode;
+        char ch = input.Event.KeyEvent.uChar.AsciiChar;
+        BOOL ctrl = input.Event.KeyEvent.dwControlKeyState &
+                    (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED);
+        int half = visible / 2 < 1 ? 1 : visible / 2;
+
+        if (vk == VK_ESCAPE || vk == 'Q' || ch == '?' || vk == VK_F1) return;
+        if (ctrl && vk == 'D') top += half;
+        else if (ctrl && vk == 'U') top -= half;
+        else if (ctrl) continue; // no other chords here
+        else if (vk == 'J' || vk == VK_DOWN) top++;
+        else if (vk == 'K' || vk == VK_UP) top--;
+        else if (vk == VK_NEXT || vk == VK_SPACE) top += visible;
+        else if (vk == VK_PRIOR) top -= visible;
+        else if (vk == VK_HOME) top = 0;
+        else if (vk == VK_END) top = count;
+    }
+}
+// ============================= Help ==============================================
+
 int HandleInput() {
     INPUT_RECORD input;
     DWORD events;
@@ -3586,6 +3754,16 @@ int HandleInput() {
     // intervening verb and pair with the next 'g' as though it were "gg"
     bool was_g = pending_g;
     pending_g = false;
+
+    // Reachable from every mode, so it sits ahead of the mode blocks below --
+    // each of those returns early for keys it does not bind, and help is most
+    // wanted from whichever mode left you unsure. Matched on the character
+    // rather than a virtual key, since '?' is Shift+/ only on some layouts
+    if (input.Event.KeyEvent.uChar.AsciiChar == '?' ||
+        input.Event.KeyEvent.wVirtualKeyCode == VK_F1) {
+        ShowHelp();
+        return 1;
+    }
 
     // Session list has its own small keymap; everything else is inert there
     if (claude_mode == CM_SESSIONS) {
