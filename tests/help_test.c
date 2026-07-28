@@ -18,10 +18,16 @@ static void TestReport(const char* name, bool passed) {
     if (!passed) test_failures++;
 }
 
-// Verbatim from ShowHelp: the visible row count, and where its writes land.
-static int HelpVisibleRows(int height) { return height - 3; }
-static int HelpContentRow(int i) { return 2 + i; }
-static int HelpFooterRow(int height) { return height - 1; }
+// Verbatim from ShowHelp: the popup's height, its visible row count, and where
+// its writes land inside its own buffer.
+static int HelpPopupHeight(int count, int screen_height) {
+    int popup_h = count + 3;
+    if (popup_h > screen_height - 2) popup_h = screen_height - 2;
+    return popup_h;
+}
+static int HelpVisibleRows(int popup_h) { return popup_h - 3; }
+static int HelpContentRow(int i) { return 1 + i; }
+static int HelpFooterRow(int popup_h) { return popup_h - 2; }
 
 // Verbatim from ShowHelp: scroll clamping, applied before anything is drawn.
 static int HelpClampTop(int top, int count, int visible) {
@@ -29,10 +35,6 @@ static int HelpClampTop(int top, int count, int visible) {
     if (top < 0) top = 0;
     return top;
 }
-
-// The column ShowHelp starts descriptions at, and the one it starts keys at.
-#define HELP_KEY_COLUMN 3
-#define HELP_TEXT_COLUMN 21
 
 int main(void) {
     const int count = (int)(sizeof(help_entries) / sizeof(help_entries[0]));
@@ -73,9 +75,11 @@ int main(void) {
                bindings_labelled);
     TestReport("the table is not empty", count > 0 && bindings > 0);
 
-    // Each of drift's modes rebinds the same letters, so the reference is only
-    // useful if it says which mode each group belongs to
-    TestReport("every mode has its own section", headings >= 6);
+    // Drift has four modes that rebind the same letters -- ordinary browsing,
+    // the workspace list, the session list, and choosing a workspace's folders
+    // -- so the reference is only useful if each has its own section. Catches a
+    // whole section going missing rather than judging what is in one
+    TestReport("every mode has its own section", headings >= 4);
     TestReport("a blank line separates each section from the last",
                headings_spaced);
 
@@ -83,46 +87,68 @@ int main(void) {
     // Layout -- the key column must not run into the description column
     // ---------------------------------------------------------------------
     bool keys_fit = true;
+    bool text_fits = true;
     const char* widest = "";
+    const char* longest = "";
     for (int i = 0; i < count; i++) {
-        if (help_entries[i].text == NULL) continue;
-        size_t len = strlen(help_entries[i].keys);
+        const HelpEntry* entry = &help_entries[i];
+        if (entry->text == NULL) {
+            // A heading shares the key column but runs the full inner width
+            if (HELP_KEY_COLUMN + (int)strlen(entry->keys) >= HELP_POPUP_WIDTH - 1) {
+                text_fits = false;
+                longest = entry->keys;
+            }
+            continue;
+        }
+        size_t len = strlen(entry->keys);
         if (HELP_KEY_COLUMN + (int)len >= HELP_TEXT_COLUMN) {
             keys_fit = false;
-            if (len > strlen(widest)) widest = help_entries[i].keys;
+            if (len > strlen(widest)) widest = entry->keys;
+        }
+        // WriteToBuffer clips at the border rather than overflowing, so an
+        // over-long description is a silent truncation rather than a crash --
+        // still wrong, and invisible without this
+        if (HELP_TEXT_COLUMN + (int)strlen(entry->text) >= HELP_POPUP_WIDTH - 1) {
+            text_fits = false;
+            if (strlen(entry->text) > strlen(longest)) longest = entry->text;
         }
     }
     if (!keys_fit) printf("    widest key string: [%s]\n", widest);
+    if (!text_fits) printf("    longest text: [%s]\n", longest);
     TestReport("no key string overruns the description column", keys_fit);
+    TestReport("nothing is silently clipped by the popup border", text_fits);
 
     // ---------------------------------------------------------------------
     // Row guard -- nothing may be written at a row >= height
     // ---------------------------------------------------------------------
-    // ShowHelp refuses anything below MIN_WINDOW_HEIGHT before it computes a
-    // row, so every height it does draw at must leave at least one visible row
+    // ShowHelp refuses a popup shorter than 6 rows, so every geometry it does
+    // draw at must leave at least one visible content row
     bool always_room_to_draw = true;
-    for (int height = MIN_WINDOW_HEIGHT; height <= 200; height++) {
-        if (HelpVisibleRows(height) < 1) always_room_to_draw = false;
+    bool refuses_the_rest = true;
+    for (int screen_height = 1; screen_height <= 300; screen_height++) {
+        int popup_h = HelpPopupHeight(count, screen_height);
+        if (popup_h < 6) continue;              // ShowHelp returns before drawing
+        if (HelpVisibleRows(popup_h) < 1) always_room_to_draw = false;
+        if (popup_h > screen_height - 2) refuses_the_rest = false;
     }
-    TestReport("every height it will draw at has room for a row",
+    TestReport("every geometry it will draw at has room for a row",
                always_room_to_draw);
+    TestReport("the popup always leaves a margin inside the window",
+               refuses_the_rest);
 
-    // And the heights it refuses are exactly the ones that would not
-    bool refuses_what_it_must = true;
-    for (int height = 1; height < MIN_WINDOW_HEIGHT; height++) {
-        // Not a requirement that they all be unusable, only that ShowHelp never
-        // reaches the drawing code for them -- asserted by the constant it
-        // compares against being the same one used here
-        if (height >= MIN_WINDOW_HEIGHT) refuses_what_it_must = false;
-    }
-    TestReport("short windows are refused before any row is computed",
-               refuses_what_it_must && MIN_WINDOW_HEIGHT - 3 >= 1);
+    // Once the window is tall enough, the whole table fits without scrolling --
+    // which is the point of trimming it down to a popup
+    int roomy = HelpPopupHeight(count, count + 5);
+    TestReport("a roomy window shows every entry at once",
+               HelpVisibleRows(roomy) >= count);
 
     bool rows_in_bounds = true;
     bool footer_clear = true;
     bool reaches_last_entry = false;
-    for (int height = MIN_WINDOW_HEIGHT; height <= 200; height++) {
-        int visible = HelpVisibleRows(height);
+    for (int screen_height = 1; screen_height <= 300; screen_height++) {
+        int popup_h = HelpPopupHeight(count, screen_height);
+        if (popup_h < 6) continue;
+        int visible = HelpVisibleRows(popup_h);
         for (int top = -5; top <= count + 5; top++) {
             int clamped = HelpClampTop(top, count, visible);
             if (clamped < 0 || (count > visible && clamped > count - visible)) {
@@ -130,15 +156,15 @@ int main(void) {
             }
             for (int i = 0; i < visible && clamped + i < count; i++) {
                 int row = HelpContentRow(i);
-                if (row < 2 || row >= height) rows_in_bounds = false;
-                if (row >= HelpFooterRow(height)) footer_clear = false;
+                if (row < 1 || row >= popup_h) rows_in_bounds = false;
+                if (row >= HelpFooterRow(popup_h)) footer_clear = false;
                 if (clamped + i == count - 1) reaches_last_entry = true;
             }
         }
-        if (HelpFooterRow(height) >= height) rows_in_bounds = false;
+        if (HelpFooterRow(popup_h) >= popup_h - 1) rows_in_bounds = false;
     }
-    TestReport("every content row stays inside the frame buffer", rows_in_bounds);
-    TestReport("content never overwrites the footer row", footer_clear);
+    TestReport("every content row stays inside the popup buffer", rows_in_bounds);
+    TestReport("content never overwrites the footer or the border", footer_clear);
     TestReport("scrolling can reach the last entry in the table",
                reaches_last_entry);
 
