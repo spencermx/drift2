@@ -143,6 +143,14 @@ once, while each member folder can still carry its own.
 New workspaces get an empty `CLAUDE.md` to fill in. drift creates it once and
 never writes to it again. Anything else you drop in there is yours.
 
+`h` at the anchor root — or `Esc`/`c` — returns to the workspace list. `q` quits
+drift outright and leaves your shell *in* the anchor, which is the one place
+claude mode changes where you land. Everywhere else in claude mode, quitting
+returns you to whatever directory you were browsing when you pressed `c`:
+workspaces are for building and editing, navigation is drift's job. The anchor
+is the exception because its directory is named for a timestamp — nothing else
+leads there, and typing the path is not realistic.
+
 ### Sessions
 
 ```
