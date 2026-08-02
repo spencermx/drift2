@@ -64,6 +64,16 @@ and only needed for the workspace features.
 | `?` or `F1` | key reference overlay |
 | `q` | quit |
 
+Symlinks and junctions draw in cyan with their target after the name, `ls -l`
+style — `latest -> ..\build`. The target is dimmed so the name still reads
+first, and trimmed from the left when the pane runs out, since the last
+components are the ones that say where the link goes. Only real links are
+marked: the reparse points Windows uses for storage tricks (OneDrive
+placeholders, the `WindowsApps` stubs) behave like ordinary files and are left
+alone, and the hidden compatibility junctions in `C:\` stay dimmed rather than
+lighting the drive root up. A link whose target is gone still shows where it
+was pointing — that being the moment you most want to know.
+
 The header carries a `?  help` hint, since a binding you can't discover may as
 well not exist. The overlay opens from every mode and groups its keys by mode,
 because drift's four modes rebind the same letters — `d` deletes files, deletes

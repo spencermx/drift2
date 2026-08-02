@@ -81,6 +81,9 @@
 // first lines of a text file, the listing of a directory, or a size note
 // for binary files. Narrower windows fall back to the two-pane layout.
 //
+// Symlinks and junctions draw cyan with their target after the name, ls -l
+// style ("latest -> ..\build"), dimmed and trimmed from the left to fit.
+//
 // Known limitations: filenames outside the system ANSI codepage are not
 // supported -- they list with '?' placeholders and file operations on them
 // are refused, since the mangled name would act as a wildcard (full support
@@ -134,6 +137,28 @@
 #define SECOND_DIVIDER_MAX (COLUMN_DIVIDER_POSITION + 58)
 #define PREVIEW_BYTES 4096
 
+// Symlinks and junctions render as "name -> target", ls -l style. Only these
+// two reparse tags are links in the sense a user means -- the rest (dedup,
+// OneDrive placeholders, the AppExecLink stubs in WindowsApps) are storage
+// tricks behind files that behave perfectly ordinarily, and tagging them
+// would light up half of C:\ for nothing
+#ifndef IO_REPARSE_TAG_SYMLINK
+#define IO_REPARSE_TAG_SYMLINK 0xA000000CL
+#endif
+#ifndef IO_REPARSE_TAG_MOUNT_POINT
+#define IO_REPARSE_TAG_MOUNT_POINT 0xA0000003L
+#endif
+#ifndef FSCTL_GET_REPARSE_POINT
+#define FSCTL_GET_REPARSE_POINT 0x000900A8
+#endif
+// MAXIMUM_REPARSE_DATA_BUFFER_SIZE -- the hard cap the filesystem enforces on
+// a reparse point's payload, so a buffer this size can never come up short
+#define REPARSE_BUFFER_BYTES 16384
+// The arrow separating a link's name from its target, and the marker that
+// replaces the head of a target too long for the pane
+#define LINK_ARROW " -> "
+#define LINK_ELLIPSIS "..."
+
 enum MarkStatus {
     MARKED,
     YANKED,
@@ -166,6 +191,22 @@ typedef struct {
 typedef struct {
     char path[MAX_PATH];
 } MarkedFile;
+// Header of what FSCTL_GET_REPARSE_POINT returns. The full REPARSE_DATA_BUFFER
+// lives in ntifs.h, which ships with the driver kit rather than the SDK, so the
+// fields are restated here -- they are a documented on-disk format and do not
+// change. Only the header is named: the two link layouts diverge after it (a
+// symlink has a Flags field before its path buffer, a junction does not), so
+// the path buffer is reached by tag-dependent offset rather than by member
+typedef struct {
+    DWORD ReparseTag;
+    WORD  ReparseDataLength;
+    WORD  Reserved;
+    WORD  SubstituteNameOffset;
+    WORD  SubstituteNameLength;
+    WORD  PrintNameOffset;
+    WORD  PrintNameLength;
+} ReparseHeader;
+#define REPARSE_SYMLINK_FLAGS_BYTES 4 // the ULONG Flags only symlinks carry
 typedef struct {
     int index;
     int distance;
@@ -228,6 +269,11 @@ int GetFilesInDirectory(char* path, WIN32_FIND_DATA files[]);
 int CompareFiles(const void* a, const void* b);
 void GetParentDirectory(char* path, char* parent);
 bool IsDirectory(WIN32_FIND_DATA* file_data);
+bool IsSymlink(WIN32_FIND_DATA* file_data);
+bool ReadLinkTarget(const char* path, char* out, int out_size);
+bool ParseLinkTarget(const char* raw, DWORD returned, char* out, int out_size);
+void LoadLinkTargets();
+int FitLinkTarget(const char* target, int cells, char* out, int out_size);
 WORD FileColor(WIN32_FIND_DATA* file);
 void DrawContextPane(CHAR_INFO* buffer, int width, int height, int divider2);
 void LoadPreview();
@@ -345,6 +391,8 @@ WORD red = FOREGROUND_RED | FOREGROUND_INTENSITY;
 WORD green = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
 WORD yellow = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
 WORD gray = FOREGROUND_INTENSITY;
+// Symlinks and junctions, matching the convention every ls colour scheme uses
+WORD cyan = FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
 // Dark yellow renders as the console's golden/orange tone -- the closest
 // 16-color match to Claude's brand color; used for the frame in claude mode
 WORD orange = FOREGROUND_RED | FOREGROUND_GREEN;
@@ -362,6 +410,11 @@ DirectoryState history[MAX_FILES];
 MarkedFile marked_files[MAX_FILES];
 WIN32_FIND_DATA current_directory_files[MAX_FILES];
 WIN32_FIND_DATA parent_directory_files[MAX_FILES];
+// Link target per row of the current listing, "" when the row is not a link.
+// Resolved once per directory load rather than per frame: drawing is on the
+// keystroke path, and a listing of links would otherwise reopen every one of
+// them on every redraw. Sized like marked_files -- a row's worth of MAX_PATH
+char link_targets[MAX_FILES][MAX_PATH];
 
 // Context (preview) pane state, cached by the selected path so the file or
 // directory is only re-read when the cursor moves to a different item
@@ -374,6 +427,11 @@ ULONGLONG preview_size;
 bool preview_is_dir;
 bool preview_binary;
 bool preview_unreadable;
+// A link whose target is gone. Worth its own state because the fallbacks are
+// both misleading: a dead directory link lists as an empty directory, which
+// reads as "nothing in here" rather than "this goes nowhere", and a dead file
+// link reads as unreadable, which sounds like a permission problem
+bool preview_broken_link;
 // Which encoding the preview bytes arrived in. Filenames are always the ANSI
 // codepage, but file contents mostly are not, and the frame buffer is UTF-16
 // either way -- so this only decides how the bytes are decoded on the way in
@@ -801,6 +859,31 @@ void DrawScreen() {
             buffer[index].Attributes = color;
         }
 
+        // ================== Link target, inline after the name ==============================
+        // Dimmed, so the name still reads first, and trimmed from the left when
+        // the pane runs out. On the selection bar it goes black instead: the
+        // dark grey a dimmed colour maps to is barely legible against silver,
+        // the same reason the bar collapses white and yellow above. A name that
+        // already filled the pane leaves no room and simply gets no arrow
+        if (link_targets[file_index][0] != '\0') {
+            int arrow_col = COLUMN_DIVIDER_POSITION + 4 + len;
+            char fitted[MAX_PATH];
+            int room = divider2 - arrow_col - (int)strlen(LINK_ARROW);
+            if (FitLinkTarget(link_targets[file_index], room, fitted, MAX_PATH) > 0) {
+                char trailer[MAX_PATH + 8];
+                snprintf(trailer, sizeof(trailer), "%s%s", LINK_ARROW, fitted);
+                wchar_t wtrailer[MAX_PATH + 8];
+                AnsiToWide(trailer, wtrailer, MAX_PATH + 8);
+                int trailer_len = (int)wcslen(wtrailer);
+                WORD target_color = (is_selected && !manifest_focused) ? bar_background : gray;
+                for (int col = 0; col < trailer_len && arrow_col + col < divider2; col++) {
+                    int index = (i + 2) * width + arrow_col + col;
+                    buffer[index].Char.UnicodeChar = wtrailer[col];
+                    buffer[index].Attributes = target_color;
+                }
+            }
+        }
+
         // ================== Highlight marked files in the current directory ==================
         // Matched by path, not row index, so highlights survive directory
         // reloads and re-sorting
@@ -907,6 +990,7 @@ void LoadPreview() {
     preview_file_count = 0;
     preview_binary = false;
     preview_unreadable = false;
+    preview_broken_link = false;
 
     WIN32_FIND_DATA* sel = &current_directory_files[selected_row];
     preview_is_dir = IsDirectory(sel);
@@ -916,6 +1000,33 @@ void LoadPreview() {
     if (!GetSelectedRowPath(selected_row, path)) {
         preview_unreadable = true;
         return;
+    }
+
+    // Is the far end still there? GetFileAttributes cannot answer it: on a
+    // dangling junction it reports the reparse point itself and succeeds.
+    // Opening the path *without* FILE_FLAG_OPEN_REPARSE_POINT is the call that
+    // has to traverse, so it is the one that fails. This does reach for the
+    // target, unlike the read that produced the arrow -- but the branches
+    // below were going to list or open that same path anyway, so it costs a
+    // handle and no new exposure
+    if (IsSymlink(sel)) {
+        HANDLE probe = CreateFile(path, 0,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (probe != INVALID_HANDLE_VALUE) {
+            CloseHandle(probe);
+        } else {
+            // Only a target that is genuinely absent gets called missing. A
+            // live one behind a permission wall fails here too, and saying it
+            // had gone would send the reader looking for the wrong problem
+            DWORD why = GetLastError();
+            if (why == ERROR_FILE_NOT_FOUND || why == ERROR_PATH_NOT_FOUND ||
+                why == ERROR_BAD_PATHNAME || why == ERROR_INVALID_NAME ||
+                why == ERROR_BAD_NETPATH || why == ERROR_BAD_NET_NAME) {
+                preview_broken_link = true;
+                return;
+            }
+        }
     }
 
     if (preview_is_dir) {
@@ -986,6 +1097,11 @@ void DrawContextPane(CHAR_INFO* buffer, int width, int height, int divider2) {
     }
 
     int col_start = divider2 + 2;
+
+    if (preview_broken_link) {
+        WriteToBuffer(buffer, width, 2, col_start, "(link target is missing)", gray);
+        return;
+    }
 
     if (preview_unreadable) {
         WriteToBuffer(buffer, width, 2, col_start, "(cannot preview)", gray);
@@ -5701,10 +5817,139 @@ bool IsDirectory(WIN32_FIND_DATA* file_data) {
     return (file_data->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 }
 
-// Display color: hidden files are dimmed, directories blue, executables
-// green, everything else white
+// dwReserved0 carries the reparse tag, but only once the attribute says there
+// is one -- on every other entry the field is undefined and reading it would
+// classify arbitrary files as links
+bool IsSymlink(WIN32_FIND_DATA* file_data) {
+    if (!(file_data->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+    return file_data->dwReserved0 == IO_REPARSE_TAG_SYMLINK ||
+           file_data->dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT;
+}
+
+// The target text a link stores, which is what ls -l prints after the arrow.
+// FILE_FLAG_OPEN_REPARSE_POINT opens the link itself instead of following it,
+// so this stays a local metadata read: a link into a dead network share cannot
+// stall the draw, and a broken link still reports where it was pointing --
+// exactly the case where the answer is worth having. Returns false when the
+// link cannot be read, leaving the row to draw as a bare name
+bool ReadLinkTarget(const char* path, char* out, int out_size) {
+    out[0] = '\0';
+    HANDLE h = CreateFile(path, 0,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          NULL, OPEN_EXISTING,
+                          FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                          NULL);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    char raw[REPARSE_BUFFER_BYTES];
+    DWORD returned = 0;
+    BOOL ok = DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0,
+                              raw, sizeof(raw), &returned, NULL);
+    CloseHandle(h);
+    if (!ok) return false;
+    return ParseLinkTarget(raw, returned, out, out_size);
+}
+
+// The payload half of ReadLinkTarget, split out because it is the part with
+// arithmetic in it: everything here is offsets the filesystem supplied, and
+// they are checked rather than trusted -- a payload naming bytes past the ones
+// actually returned would read off the end of the buffer
+bool ParseLinkTarget(const char* raw, DWORD returned, char* out, int out_size) {
+    out[0] = '\0';
+    if (out_size < 2 || returned < sizeof(ReparseHeader)) return false;
+
+    const ReparseHeader* head = (const ReparseHeader*)raw;
+    if (head->ReparseTag != IO_REPARSE_TAG_SYMLINK &&
+        head->ReparseTag != IO_REPARSE_TAG_MOUNT_POINT) {
+        return false;
+    }
+    // Where the names begin: past the header, and past the Flags field that
+    // only the symlink layout has
+    size_t names = sizeof(ReparseHeader);
+    if (head->ReparseTag == IO_REPARSE_TAG_SYMLINK) names += REPARSE_SYMLINK_FLAGS_BYTES;
+    // Before any subtraction below can borrow against it: a payload too short
+    // to hold even the fixed part would make `returned - names` an enormous
+    // unsigned number, and every bounds check after it would pass
+    if (returned < names) return false;
+
+    // The print name is the target as it was written -- "..\build", "C:\Data".
+    // The substitute name is the NT form of the same thing and is always
+    // present, so it is the fallback for the links (some junctions) that
+    // store no print name
+    WORD offset = head->PrintNameOffset;
+    WORD length = head->PrintNameLength;
+    if (length == 0) {
+        offset = head->SubstituteNameOffset;
+        length = head->SubstituteNameLength;
+    }
+    if (length == 0 || (length % sizeof(WCHAR)) != 0) return false;
+    if ((size_t)offset + length > returned - names) return false;
+
+    const WCHAR* name = (const WCHAR*)(raw + names + offset);
+    int chars = (int)(length / sizeof(WCHAR));
+    // "\??\C:\Data" is the NT spelling of "C:\Data" -- an internal prefix that
+    // means nothing to the user and would push the informative tail out of an
+    // already narrow pane
+    if (chars > 4 && wcsncmp(name, L"\\??\\", 4) == 0) {
+        name += 4;
+        chars -= 4;
+    }
+    int written = WideCharToMultiByte(CP_ACP, 0, name, chars, out, out_size - 1,
+                                      NULL, NULL);
+    if (written <= 0) return false;
+    out[written] = '\0';
+    return true;
+}
+
+// Fills link_targets for the current listing. Rows that are not links get "",
+// which is what the draw path tests, so a failed read is indistinguishable
+// from an ordinary file and simply draws no arrow
+void LoadLinkTargets() {
+    for (int i = 0; i < current_directory_file_count; i++) {
+        link_targets[i][0] = '\0';
+        if (!IsSymlink(&current_directory_files[i])) continue;
+
+        char path[MAX_PATH];
+        if (!GetFilePath(current_directory, &current_directory_files[i], path)) continue;
+        ReadLinkTarget(path, link_targets[i], MAX_PATH);
+    }
+}
+
+// Lays a target into `cells` columns, trimming from the left so the tail
+// survives: the last components say where the link actually goes, while the
+// head is usually the directory being browsed. Returns the length written,
+// 0 when there is no room worth using
+int FitLinkTarget(const char* target, int cells, char* out, int out_size) {
+    out[0] = '\0';
+    if (cells <= 0 || out_size <= 0) return 0;
+    if (cells > out_size - 1) cells = out_size - 1;
+
+    int len = (int)strlen(target);
+    if (len <= cells) {
+        memcpy(out, target, (size_t)len);
+        out[len] = '\0';
+        return len;
+    }
+    // Below this the ellipsis would be the whole of what fits, which says
+    // only "truncated" -- something the running-into-the-divider already says
+    int marker = (int)strlen(LINK_ELLIPSIS);
+    if (cells <= marker) return 0;
+
+    int tail = cells - marker;
+    memcpy(out, LINK_ELLIPSIS, (size_t)marker);
+    memcpy(out + marker, target + (len - tail), (size_t)tail);
+    out[cells] = '\0';
+    return cells;
+}
+
+// Display color: hidden files are dimmed, links cyan, directories blue,
+// executables green, everything else white. Hidden comes first on purpose --
+// Windows leans on junctions for compatibility shims ("C:\Users\All Users"),
+// and those are hidden, so honouring hidden keeps the drive root from lighting
+// up with links nobody put there
 WORD FileColor(WIN32_FIND_DATA* file) {
     if (file->dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) return gray;
+    if (IsSymlink(file)) return cyan;
     if (file->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return blue;
     char* ext = strrchr(file->cFileName, '.');
     if (ext != NULL && (_stricmp(ext, ".exe") == 0 || _stricmp(ext, ".bat") == 0 ||
@@ -5777,6 +6022,7 @@ bool MarkDirEqualToCurrentDir() {
 // Full reset -- used when *changing* directories
 void LoadCurrentDirectory() {
     current_directory_file_count = GetFilesInDirectory(current_directory, current_directory_files);
+    LoadLinkTargets();
     selected_row = 0;
     top_row = 0;
     preview_path[0] = '\0'; // contents may have changed under the same path
@@ -5786,6 +6032,7 @@ void LoadCurrentDirectory() {
 // doesn't jump back to the top. DrawScreen normalizes top_row.
 void ReloadCurrentDirectory() {
     current_directory_file_count = GetFilesInDirectory(current_directory, current_directory_files);
+    LoadLinkTargets();
     if (selected_row >= current_directory_file_count) {
         selected_row = current_directory_file_count - 1;
     }
