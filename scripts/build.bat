@@ -62,4 +62,23 @@ if errorlevel 1 (
 del build\drift.obj >nul 2>&1
 echo.
 echo Build succeeded: %CD%\build\drift.exe
+
+REM WINDOWS_BIN is published by the windows setup repo (spencermx/windows) and
+REM points at a directory already on PATH. If it is set, install there too so a
+REM fresh build is immediately the drift you get when you type `drift`.
+REM
+REM Entirely opportunistic: not having it set is the normal case for anyone
+REM else building this, and a failed copy is reported but does not fail the
+REM build -- the binary in build\ is still good.
+if not defined WINDOWS_BIN goto :done
+if not exist "%WINDOWS_BIN%\" goto :done
+
+copy /y build\drift.exe "%WINDOWS_BIN%\drift.exe" >nul 2>&1
+if errorlevel 1 (
+    echo Note: could not install to %WINDOWS_BIN% -- is drift still running?
+) else (
+    echo Installed to:    %WINDOWS_BIN%\drift.exe
+)
+
+:done
 exit /b 0
