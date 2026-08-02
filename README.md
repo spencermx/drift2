@@ -116,6 +116,12 @@ with none Visual Studio isn't offered at all. A cursor resting on a `.sln` names
 that one directly. Solutions are looked for in that one directory — if it lives a
 level down, step in and press `v` again.
 
+Both `.sln` and the XML `.slnx` that Visual Studio 2026 writes count as
+solutions. Migrating leaves the two side by side, so a `Foo.sln` and a
+`Foo.slnx` are treated as the one solution they are and `v` stays a single
+keypress — the `.slnx` is the one offered, since it's the one VS 2026 opens.
+Park the cursor on the `.sln` if you want that one instead.
+
 Both editors are GUI programs, so drift spawns them and keeps running rather than
 suspending itself the way `Enter` and the Claude session verbs do.
 
@@ -127,7 +133,7 @@ suspending itself the way `Enter` and the Claude session verbs do.
    opens in the one it was written for.
 2. `devenv.exe`, if `...\Common7\IDE` is on your `PATH`. One fixed install for
    every solution, which is why it's the fallback.
-3. The `.sln` file association — whatever a double-click would do.
+3. The file association — whatever a double-click would do.
 
 **VS Code** is resolved as `code.cmd` or `code.exe` from `PATH`; its installer
 puts `bin\` there. Neither editor is required — if one is missing, `v` says so

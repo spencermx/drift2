@@ -30,9 +30,9 @@
 //              what cannot be guessed -- vim motion is assumed
 // - V        : Open in an editor. A j/k-and-Enter menu offers VS Code (the
 //              directory under the cursor, else the one being browsed) and
-//              Visual Studio (a .sln in that directory -- named outright when
-//              there is one, picked from a second menu when there are
-//              several). Both are GUI programs, so they are spawned detached
+//              Visual Studio (a .sln or .slnx in that directory -- named
+//              outright when there is one, picked from a second menu when
+//              there are several). Both are GUI programs, so spawned detached
 //              and drift keeps running rather than suspending itself the way
 //              Enter and claude do
 // Claude workspaces:
@@ -4189,13 +4189,33 @@ void OpenFileInEditor() {
     }
 }
 
+// The two spellings of a solution: the classic ".sln" and the XML ".slnx"
+// Visual Studio 2026 writes. Returns the extension, or NULL when `leaf` is
+// neither -- so a caller can tell the two apart as well as accept both.
+static const char* SolutionExtension(const char* leaf) {
+    const char* ext = strrchr(leaf, '.');
+    if (ext == NULL) return NULL;
+    if (_stricmp(ext, ".sln") == 0 || _stricmp(ext, ".slnx") == 0) return ext;
+    return NULL;
+}
+
+// Length of a path up to its final dot, so "Foo.sln" and "Foo.slnx" share a
+// stem and "Foo.sln" and "Bar.slnx" do not.
+static size_t SolutionStemLength(const char* path) {
+    const char* dot = strrchr(path, '.');
+    return (dot != NULL) ? (size_t)(dot - path) : strlen(path);
+}
+
 // Solutions directly inside `dir`, one level only. A solution lives at the root
 // of the thing it builds, and drift is a browser -- if it is one level down,
 // step into that folder and press v again rather than have this guess.
 int FindSolutionsIn(const char* dir, char names[][MAX_PATH], int max) {
     if (dir == NULL || dir[0] == '\0' || max <= 0) return 0;
     char search[MAX_PATH];
-    if (snprintf(search, MAX_PATH, "%s\\*.sln", dir) >= MAX_PATH) return 0;
+    // "*.sln*", not "*.sln": .slnx has to be enumerated outright rather than
+    // relying on it arriving through an 8.3 short name, which a volume may not
+    // be generating at all
+    if (snprintf(search, MAX_PATH, "%s\\*.sln*", dir) >= MAX_PATH) return 0;
 
     WIN32_FIND_DATA fd;
     HANDLE hFind = FindFirstFile(search, &fd);
@@ -4204,17 +4224,39 @@ int FindSolutionsIn(const char* dir, char names[][MAX_PATH], int max) {
     int count = 0;
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        // A wildcard pattern also matches against the 8.3 short name, so
-        // "*.sln" can return a .slnx or .sln-backup. Confirm the real extension
-        const char* ext = strrchr(fd.cFileName, '.');
-        if (ext == NULL || _stricmp(ext, ".sln") != 0) continue;
+        // The pattern is deliberately loose, and a wildcard also matches
+        // against the 8.3 short name, so it can return a .sln-backup or worse.
+        // Confirm the real extension
+        const char* ext = SolutionExtension(fd.cFileName);
+        if (ext == NULL) continue;
         // Same contract as GetFilePath: '?' and '*' mean FindFirstFileA
         // mangled a name it could not represent in the ANSI codepage, and the
         // mangled spelling would name the wrong file
         if (strpbrk(fd.cFileName, "?*") != NULL) continue;
-        if (snprintf(names[count], MAX_PATH, "%s\\%s", dir, fd.cFileName) >= MAX_PATH) {
+        char path[MAX_PATH];
+        if (snprintf(path, MAX_PATH, "%s\\%s", dir, fd.cFileName) >= MAX_PATH) {
             continue;
         }
+        // Migrating to the new format leaves the .sln sitting beside the .slnx
+        // it produced, and both usually get committed. That is one solution
+        // wearing two names, so collapse it -- otherwise every migrated repo
+        // would answer v with a picker instead of a single key. The .slnx wins
+        // as the one VS 2026 itself opens; a cursor parked on the .sln still
+        // names that one outright
+        int twin = -1;
+        size_t stem = SolutionStemLength(path);
+        for (int i = 0; i < count; i++) {
+            if (SolutionStemLength(names[i]) == stem &&
+                _strnicmp(names[i], path, stem) == 0) {
+                twin = i;
+                break;
+            }
+        }
+        if (twin >= 0) {
+            if (_stricmp(ext, ".slnx") == 0) strcpy(names[twin], path);
+            continue;
+        }
+        strcpy(names[count], path);
         count++;
     } while (FindNextFile(hFind, &fd) && count < max);
     FindClose(hFind);
@@ -4253,6 +4295,11 @@ static bool OpenFolderInVsCode(const char* folder) {
 // Visual Studio it was written for; devenv from PATH is one fixed install for
 // all of them; the association is whatever a double-click would do. A machine
 // missing the first two still works, which is the point of having all three.
+//
+// All three take a path and nothing else, so .slnx needs no handling here. A
+// .slnx carries no version header for the selector to read, but it is a format
+// only recent Visual Studios understand, so whichever install it settles on is
+// one that can open it.
 static bool OpenSolutionInVisualStudio(const char* solution) {
     char argument[MAX_PATH + 4];
     if (snprintf(argument, sizeof(argument), "\"%s\"", solution) >=
@@ -4482,8 +4529,7 @@ void HandleOpenInEditor() {
         snprintf(folder, sizeof(folder), "%s", current_directory);
         // The cursor resting on a solution names it outright -- no reason to
         // scan for it, or to offer the others beside it
-        const char* ext = strrchr(sel->cFileName, '.');
-        if (ext != NULL && _stricmp(ext, ".sln") == 0 &&
+        if (SolutionExtension(sel->cFileName) != NULL &&
             GetSelectedRowPath(selected_row, solutions[0])) {
             solution_count = 1;
         } else {

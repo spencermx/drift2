@@ -97,17 +97,19 @@ int main(int argc, char* argv[]) {
     }
 
     char cwd[MAX_PATH], editors[MAX_PATH], vs[MAX_PATH];
-    char none[MAX_PATH], one[MAX_PATH], many[MAX_PATH];
+    char none[MAX_PATH], one[MAX_PATH], many[MAX_PATH], twins[MAX_PATH];
     bool paths_ok =
         TestJoin(cwd, sizeof(cwd), root, "cwd") &&
         TestJoin(editors, sizeof(editors), root, "editors") &&
         TestJoin(vs, sizeof(vs), root, "vs") &&
         TestJoin(none, sizeof(none), root, "no-solution") &&
         TestJoin(one, sizeof(one), root, "one-solution") &&
-        TestJoin(many, sizeof(many), root, "many-solutions");
+        TestJoin(many, sizeof(many), root, "many-solutions") &&
+        TestJoin(twins, sizeof(twins), root, "migrated-solution");
     if (!paths_ok || !TestMakeDirectory(cwd) || !TestMakeDirectory(editors) ||
         !TestMakeDirectory(vs) || !TestMakeDirectory(none) ||
-        !TestMakeDirectory(one) || !TestMakeDirectory(many)) {
+        !TestMakeDirectory(one) || !TestMakeDirectory(many) ||
+        !TestMakeDirectory(twins)) {
         fprintf(stderr, "Could not create test fixture directories.\n");
         return 1;
     }
@@ -288,14 +290,39 @@ int main(int argc, char* argv[]) {
                one_ok && FindSolutionsIn(one, solutions, MAX_SOLUTIONS) == 1 &&
                _stricmp(solutions[0], sln) == 0);
 
-    // Extensions that a wildcard can reach through 8.3 short names but which
-    // are not solutions
-    bool decoys_ok =
-        TestJoin(sln, sizeof(sln), one, "NotOne.slnx") && TestTouch(sln) &&
+    // The scan pattern is loose and a wildcard also matches 8.3 short names,
+    // so near-misses have to be rejected on their real extension
+    bool backup_ok =
         TestJoin(sln, sizeof(sln), one, "NotTwo.sln.bak") && TestTouch(sln);
-    TestReport("only a real .sln extension counts",
-               decoys_ok && FindSolutionsIn(one, solutions, MAX_SOLUTIONS) == 1 &&
+    TestReport("a .sln-backup beside a solution is not one",
+               backup_ok && FindSolutionsIn(one, solutions, MAX_SOLUTIONS) == 1 &&
                SolutionsContain(solutions, 1, "OnlyOne.sln"));
+
+    // Visual Studio 2026 writes the XML form, and a repo can hold nothing else
+    bool slnx_ok = TestJoin(sln, sizeof(sln), one, "NotOne.slnx") && TestTouch(sln);
+    TestReport("a .slnx counts as a solution in its own right",
+               slnx_ok && FindSolutionsIn(one, solutions, MAX_SOLUTIONS) == 2 &&
+               SolutionsContain(solutions, 2, "OnlyOne.sln") &&
+               SolutionsContain(solutions, 2, "NotOne.slnx"));
+
+    // Migration leaves both spellings of one solution side by side. Collapsing
+    // them is what keeps v a single keypress on a migrated repo
+    bool twins_ok =
+        TestJoin(sln, sizeof(sln), twins, "Migrated.sln") && TestTouch(sln) &&
+        TestJoin(sln, sizeof(sln), twins, "Migrated.slnx") && TestTouch(sln);
+    int twin_count = FindSolutionsIn(twins, solutions, MAX_SOLUTIONS);
+    TestReport("a .sln and .slnx of the same name are one solution, the .slnx",
+               twins_ok && twin_count == 1 &&
+               SolutionsContain(solutions, twin_count, "Migrated.slnx"));
+
+    // Only an exact stem collides -- "Foo" and "FooBar" are separate products
+    bool near_ok =
+        TestJoin(sln, sizeof(sln), twins, "MigratedTests.slnx") && TestTouch(sln);
+    twin_count = FindSolutionsIn(twins, solutions, MAX_SOLUTIONS);
+    TestReport("a longer name sharing a prefix stays its own solution",
+               near_ok && twin_count == 2 &&
+               SolutionsContain(solutions, twin_count, "Migrated.slnx") &&
+               SolutionsContain(solutions, twin_count, "MigratedTests.slnx"));
 
     bool many_ok = true;
     for (int i = 0; i < MAX_SOLUTIONS + 3; i++) {
@@ -503,6 +530,9 @@ int main(int argc, char* argv[]) {
     if (TestJoin(sln, sizeof(sln), one, "OnlyOne.sln")) DeleteFile(sln);
     if (TestJoin(sln, sizeof(sln), one, "NotOne.slnx")) DeleteFile(sln);
     if (TestJoin(sln, sizeof(sln), one, "NotTwo.sln.bak")) DeleteFile(sln);
+    if (TestJoin(sln, sizeof(sln), twins, "Migrated.sln")) DeleteFile(sln);
+    if (TestJoin(sln, sizeof(sln), twins, "Migrated.slnx")) DeleteFile(sln);
+    if (TestJoin(sln, sizeof(sln), twins, "MigratedTests.slnx")) DeleteFile(sln);
     RemoveDirectory(decoy_launcher);
     RemoveDirectory(decoy_msenv);
     RemoveDirectory(decoy_shared);
@@ -510,6 +540,7 @@ int main(int argc, char* argv[]) {
     RemoveDirectory(msenv);
     RemoveDirectory(shared);
     RemoveDirectory(vs);
+    RemoveDirectory(twins);
     RemoveDirectory(many);
     RemoveDirectory(one);
     RemoveDirectory(none);
