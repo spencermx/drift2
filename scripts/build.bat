@@ -70,12 +70,22 @@ REM
 REM Entirely opportunistic: not having it set is the normal case for anyone
 REM else building this, and a failed copy is reported but does not fail the
 REM build -- the binary in build\ is still good.
-if not defined WINDOWS_BIN goto :done
-if not exist "%WINDOWS_BIN%\" goto :done
+REM Say why when it does not install. Silence here is indistinguishable from
+REM success, and the binary in build\ is not the one on PATH -- you would carry
+REM on running the old drift without knowing.
+if not defined WINDOWS_BIN (
+    echo Not installed:   WINDOWS_BIN is not set, so build\drift.exe is all you get.
+    echo                  If it was set recently, this shell predates it -- open a new one.
+    goto :done
+)
+if not exist "%WINDOWS_BIN%\" (
+    echo Not installed:   WINDOWS_BIN points at %WINDOWS_BIN%, which does not exist.
+    goto :done
+)
 
 copy /y build\drift.exe "%WINDOWS_BIN%\drift.exe" >nul 2>&1
 if errorlevel 1 (
-    echo Note: could not install to %WINDOWS_BIN% -- is drift still running?
+    echo Not installed:   copy to %WINDOWS_BIN% failed -- is drift still running?
 ) else (
     echo Installed to:    %WINDOWS_BIN%\drift.exe
 )
