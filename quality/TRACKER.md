@@ -71,7 +71,7 @@ can discover the complete commit set without the user supplying hashes.
 | [DRIFT-007](issues/DRIFT-007.md) | Medium | Verified | Session-delete confirmation remains armed invisibly after resize | `drift.c:HandleDeleteSession`, `tests/session_delete_test.c` | Codex | Claude: approved with residual risk | Fixed in `a502428`; DRIFT-003 compatibility re-confirmed; repeated-resize coverage gap noted |
 | DRIFT-008 | Medium | Untriaged | Workspace rename can truncate an unchanged long name | `drift.c:HandleRenameWorkspace` | — | — | — |
 | DRIFT-009 | Medium | Untriaged | Session rename can persist malformed UTF-8 | `drift.c:HandleRenameSession` | — | — | — |
-| DRIFT-010 | Medium | Untriaged | The 256-session limit can omit the newest sessions | `drift.c:LoadSessionsFor` | — | — | — |
+| [DRIFT-010](issues/DRIFT-010.md) | Medium | Untriaged | The 256-session limit can omit the newest sessions | `drift.c:LoadSessionsFor` | — | — | — |
 | DRIFT-011 | Medium | Untriaged | Documented bare `drift` invocation bypasses `drift.bat` | `README.md:Install`, `drift.bat` | — | — | — |
 | DRIFT-012 | Medium | Untriaged | Default-application launches use the wrong working directory | `drift.c:OpenFileInEditor` | — | — | — |
 | DRIFT-013 | Medium | Untriaged | Last-directory handoff is stale and cross-instance unsafe | `drift.c:Cleanup`, `drift.bat` | — | — | — |
@@ -83,7 +83,7 @@ can discover the complete commit set without the user supplying hashes.
 | DRIFT-019 | Low | Untriaged | Name-entry fields reject all non-ASCII input | `drift.c:HandleRenameSession`, `drift.c:HandleCreate` | — | — | — |
 | DRIFT-020 | Low | Untriaged | Shrinking a name popup leaves an invisible accepted suffix | `drift.c:HandleRenameSession` | — | — | — |
 | DRIFT-021 | Low | Untriaged | Manifest-focused input ignores key modifiers | `drift.c:HandleInput` | — | — | — |
-| DRIFT-022 | Low | Untriaged | Quick-add exposes only the first nine workspaces | `drift.c:HandleQuickAdd` | — | — | — |
+| [DRIFT-022](issues/DRIFT-022.md) | Low | Fix planned | Quick-add exposes only the first nine workspaces | `drift.c:HandleQuickAdd` | — | — | Accepted: scrolling window, newest-first, digits select within the visible page; blocked until DRIFT-014 is `Verified` |
 | DRIFT-023 | Low | Untriaged | Quick-add success banner is immediately overwritten | `drift.c:HandleQuickAdd` | — | — | — |
 | DRIFT-024 | Low | Untriaged | Wine handoff loses browser and session context | `run.sh:Claude launch handoff` | — | — | — |
 | DRIFT-025 | Low | Untriaged | Partial delete retains marks for already recycled sources | `drift.c:ConfirmDelete` | — | — | — |
