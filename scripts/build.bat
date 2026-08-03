@@ -63,32 +63,9 @@ del build\drift.obj >nul 2>&1
 echo.
 echo Build succeeded: %CD%\build\drift.exe
 
-REM WINDOWS_BIN is published by the windows setup repo (spencermx/windows) and
-REM points at a directory already on PATH. If it is set, install there too so a
-REM fresh build is immediately the drift you get when you type `drift`.
-REM
-REM Entirely opportunistic: not having it set is the normal case for anyone
-REM else building this, and a failed copy is reported but does not fail the
-REM build -- the binary in build\ is still good.
-REM Say why when it does not install. Silence here is indistinguishable from
-REM success, and the binary in build\ is not the one on PATH -- you would carry
-REM on running the old drift without knowing.
-if not defined WINDOWS_BIN (
-    echo Not installed:   WINDOWS_BIN is not set, so build\drift.exe is all you get.
-    echo                  If it was set recently, this shell predates it -- open a new one.
-    goto :done
-)
-if not exist "%WINDOWS_BIN%\" (
-    echo Not installed:   WINDOWS_BIN points at %WINDOWS_BIN%, which does not exist.
-    goto :done
-)
+REM No install step. build\ is itself on PATH -- the windows setup repo adds
+REM this directory rather than copying the binary out of it, so a fresh build
+REM is immediately the drift you get when you type `drift`. One binary, one
+REM location, no question of which one is running.
 
-copy /y build\drift.exe "%WINDOWS_BIN%\drift.exe" >nul 2>&1
-if errorlevel 1 (
-    echo Not installed:   copy to %WINDOWS_BIN% failed -- is drift still running?
-) else (
-    echo Installed to:    %WINDOWS_BIN%\drift.exe
-)
-
-:done
 exit /b 0
